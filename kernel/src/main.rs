@@ -16,6 +16,7 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use bootloader_api::{entry_point, BootInfo, BootloaderConfig};
 
 pub const CONFIG: BootloaderConfig = {
@@ -40,9 +41,9 @@ mod pic;
 // --- Re-import shared modules from the lib crate ---
 use brane_os_kernel::serial_println;
 use brane_os_kernel::{
-    acpi, ai, apic, audit, block, brane, dns, framebuffer, gdt, ipc, memory, module_loader, net,
-    pci, process, ramfs, sched, security, serial, shell, smp, socket, syscall, tty, usermode, vfs,
-    virtio, virtio_block,
+    acpi, ai, apic, audit, block, brane, dns, fat32, framebuffer, gdt, ipc, memory, module_loader,
+    net, pci, process, ramfs, sched, security, serial, shell, smp, socket, syscall, tty, usermode,
+    vfs, virtio, virtio_block, xhci,
 };
 
 // -----------------------------------------------------------------------
@@ -695,13 +696,64 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // === Phase 9: Networking ===
     serial_println!("[boot] Phase 9: Networking...");
-    let (pci_functions, pci_buses, pci_overflowed) = pci::init();
+    let (pci_functions, pci_buses, pci_overflowed, pci_backend) =
+        pci::init(&mut mapper, &mut frame_alloc, acpi::info().ecam);
+    serial_println!("[pci]  Config backend: {:?}", pci_backend);
     serial_println!(
         "[pci]  Enumeration complete: {} function(s) across {} bus(es), overflow={}",
         pci_functions,
         pci_buses,
         pci_overflowed,
     );
+    match xhci::init(&mut mapper, &mut frame_alloc, phys_offset) {
+        Ok(Some(controller)) => {
+            serial_println!(
+                "[xhci] Controller ready: {:02x}:{:02x}.{}, version={:x}.{:02x}, ports={}, slots={}, interrupters={}, BAR0=0x{:X}/{} KiB",
+                controller.pci_device.address.bus,
+                controller.pci_device.address.device,
+                controller.pci_device.address.function,
+                controller.interface_version >> 8,
+                controller.interface_version & 0xFF,
+                controller.max_ports,
+                controller.max_device_slots,
+                controller.max_interrupters,
+                controller.mmio.physical_base,
+                controller.mmio.size / 1024,
+            );
+            serial_println!(
+                "[xhci] Runtime ready: reset=ok, running={}, command_probe={}, page={} bytes, slots={}, scratchpads={}, command_trbs={}, event_trbs={}",
+                controller.running,
+                if controller.command_probe_completed { "ok" } else { "failed" },
+                controller.page_size,
+                controller.enabled_slots,
+                controller.scratchpad_buffers,
+                controller.command_ring_trbs,
+                controller.event_ring_trbs,
+            );
+            serial_println!(
+                "[xhci] Ports ready: protocols={}, connected={}, addressed_port={}, addressed_slot={}, speed_id={}",
+                controller.supported_protocols,
+                controller.connected_ports,
+                controller.addressed_port,
+                controller.addressed_slot,
+                controller.addressed_speed_id,
+            );
+            if controller.addressed_slot != 0 {
+                serial_println!(
+                    "[xhci] Device addressed: slot={}, port={}, speed_id={}",
+                    controller.addressed_slot,
+                    controller.addressed_port,
+                    controller.addressed_speed_id,
+                );
+            }
+        }
+        Ok(None) => {
+            serial_println!("[xhci] No xHCI controller found.");
+        }
+        Err(error) => {
+            serial_println!("[xhci] Controller bootstrap failed: {:?}", error);
+        }
+    }
     let mut boot_block_id = None;
     if let Some(controller) = virtio::find_virtio_block() {
         match virtio_block::init(controller, &mut frame_alloc, phys_offset) {
@@ -753,6 +805,52 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             }
             Err(error) => {
                 serial_println!("[block] LBA0 read probe failed: {:?}", error);
+            }
+        }
+
+        match fat32::Fat32Fs::mount(id) {
+            Ok(filesystem) => {
+                serial_println!(
+                    "[fat32] Volume ready: device={}, label={}, partition_lba={}, root_cluster={}",
+                    filesystem.device_id(),
+                    filesystem.volume_label(),
+                    filesystem.partition_lba(),
+                    filesystem.root_cluster(),
+                );
+                let filesystem = Box::leak(Box::new(filesystem));
+                let filesystem_ref: &mut dyn vfs::FileSystem = filesystem;
+                let mount_result = unsafe { vfs::VFS.lock().mount("/disk", filesystem_ref) };
+                match mount_result {
+                    Ok(()) => {
+                        let mut probe = [0u8; 64];
+                        let prefix_result = vfs::VFS.lock().read("/disk/README.TXT", 0, &mut probe);
+                        let prefix_ok = matches!(prefix_result, Ok(bytes) if probe[..bytes]
+                            .starts_with(b"Brane OS FAT32 block path ready.\n"));
+                        let mut chain_probe = [0u8; 32];
+                        let chain_result = vfs::VFS.lock().read(
+                            "/disk/README.TXT",
+                            fat32::SECTOR_SIZE,
+                            &mut chain_probe,
+                        );
+                        let chain_ok = matches!(chain_result, Ok(bytes) if &chain_probe[..bytes]
+                            == b"FAT32-CHAIN-OK\n");
+                        if prefix_ok && chain_ok {
+                            serial_println!("[fat32] Read probe: /disk/README.TXT ok");
+                        } else {
+                            serial_println!(
+                                "[fat32] Read probe failed: prefix={:?}, chain={:?}",
+                                prefix_result,
+                                chain_result,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        serial_println!("[fat32] Mount at /disk failed: {:?}", error);
+                    }
+                }
+            }
+            Err(error) => {
+                serial_println!("[fat32] No mountable volume: {:?}", error);
             }
         }
     }

@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §18.  
 > Estado: **Activo**.  
-> Última actualización: **2026-09-01**
+> Última actualización: **2026-09-06**
 
 ---
 
@@ -31,6 +31,10 @@ Brane OS utiliza una estrategia de testing multinivel que cubre desde unidades a
   límites de LBA, nombres duplicados y dispositivos de solo lectura.
 - Reserva DMA contigua con alineación/límite físico y layout de virtqueue
   legacy, incluidas cadenas de descriptores de lectura y escritura.
+- FAT32 read-only sobre superfloppy y partición MBR: validación del BPB,
+  directorios anidados 8.3, resolución case-insensitive, offsets y cadenas FAT.
+- xHCI: capability/register layout, Supported Protocol/PORTSC, scratchpads,
+  selección de página, TRB Link, ERST y codificación Enable Slot/Address Device.
 
 **Herramientas:** `cargo test`, test modules en Rust (`#[cfg(test)]`).
 
@@ -60,6 +64,7 @@ Brane OS utiliza una estrategia de testing multinivel que cubre desde unidades a
 - Los logs seriales contienen el banner esperado.
 - ACPI descubre RSDP/FADT y publica su estado de inicialización.
 - PCI completa el inventario, registra `virtio-blk0` y lee LBA0 antes de `brsh`.
+- FAT32 monta el disco de prueba en `/disk` y lee `README.TXT` mediante el VFS.
 - La inicialización de subsistemas ocurre en orden correcto.
 - El proceso init se crea exitosamente.
 
@@ -147,10 +152,11 @@ GitHub Actions valida en cada `push` y `pull_request` hacia `main`:
 | Formatting | Activo | `cargo fmt --all -- --check` |
 | Clippy | Activo | Kernel bare-metal + runner host con `-D warnings` |
 | Kernel unit tests | Activo | `cargo test -p brane_os_kernel --lib` |
-| **PCI + block + DMA (host)** | **Activo** | Inventario, bus mastering, registro, bounds, DMA contiguo y virtqueue (139 tests totales) |
+| **Storage host** | **Activo** | xHCI, MCFG/ECAM, PCI, block, DMA, virtqueue y FAT32 MBR/superfloppy/directorios/cadenas (157 tests totales) |
 | **Stress y mutation-fuzz** | **Activo** | `make stress-test` (parsers, allocator, IPC y dispatcher SMP concurrente) |
 | **Release artifact (ISO UEFI)** | **Activo** | `make iso-test VERSION=ci` (ISO, checksum y boot con OVMF) |
-| **Boot test (QEMU)** | **Activo** | Kernel release + disco virtio legacy read-only; exige registro y lectura real de LBA0 |
+| **Boot test (QEMU)** | **Activo** | Kernel release + FAT32 virtio legacy read-only; exige LBA0, montaje `/disk` y lectura VFS real |
+| **PCIe ECAM test (Q35)** | **Activo** | `make pcie-test` exige MCFG/ECAM, virtio-blk/FAT32 y un `usb-kbd` reseteado, asignado a slot y direccionado por xHCI |
 | **SMP/AP startup test (QEMU)** | **Activo** | `make smp-test` (4 vCPU, INIT/SIPI, estado per-CPU, 8 rondas acotadas y workers reales en CPU1–CPU3) |
 | **SMP run-queue + dispatcher model (host)** | **Activo** | `cargo test -p brane_os_kernel --lib sched::multicore_tests` (balanceo, steal, ownership y retorno al idle entre quanta) |
 | **SMP per-CPU timer state (host)** | **Activo** | `cargo test -p brane_os_kernel --lib cpu_local_scheduler_tracks_timer_without_touching_bsp` (slot, ticks y aislamiento del cursor BSP) |
@@ -189,7 +195,12 @@ La validación local equivalente recomendada está documentada en
 9. Release v1.0: ISO booteable + documentación API publicada.
 10. ~~Fase 13: base de block layer y enumeración PCI con pruebas host y boot.~~ ✅ **Completado** (`pci.rs`, `block.rs`, 134 tests y verificación QEMU)
 11. ~~Fase 13: transporte `virtio-blk`, DMA y primer dispositivo real.~~ ✅ **Completado** (139 tests + boot QEMU 1/4 vCPU + lectura LBA0)
-12. Fase 13: conectar FAT32 a la block layer y leer directorios/archivos reales.
+12. ~~Fase 13: conectar FAT32 a la block layer y leer directorios/archivos reales.~~ ✅ **Completado** (143 tests + montaje `/disk` + lectura VFS sobre virtio-blk en QEMU)
+13. ~~Fase 13: validar ACPI MCFG e implementar PCIe ECAM con fallback CF8/CFC.~~ ✅ **Completado** (145 tests + Q35 + virtio-blk/FAT32 sobre ECAM)
+14. ~~Fase 13: sondear tamaños de BAR, mapear apertures MMIO y comenzar xHCI.~~ ✅ **Completado** (150 tests + Q35/ECAM + BAR0 MMIO + capability header xHCI)
+15. ~~Fase 13: reset controlado de xHCI y estructuras DMA para command/event rings.~~ ✅ **Completado** (153 tests + Q35 reset/running + No Op Command Completion sobre DMA)
+16. ~~Fase 13: Supported Protocol/PORTSC y ciclo Enable Slot/Address Device.~~ ✅ **Completado** (157 tests + teclado Q35 conectado, reset de puerto, slot/contextos y Address Device)
+17. Fase 13: transferencias de control, descriptores USB/HID y endpoint interrupt IN.
 
 ## 7. Make targets disponibles
 
@@ -201,10 +212,11 @@ La validación local equivalente recomendada está documentada en
 | `make release-test` | Valida ISO, checksum, archive y catálogo El Torito |
 | `make test-image` | Compila una imagen compartida con el kernel release |
 | `make boot-test` | Boot test del kernel release en QEMU/TCG (60 s) |
+| `make pcie-test` | Boot Q35; valida ACPI MCFG, PCIe ECAM y storage real |
 | `make smp-test` | Boot con 4 vCPU, hand-off real y ejecución verificada en cada AP |
 | `make acpi-test` | S3, shell post-resume y `yield` aislado del BSP en QEMU/QMP (120 s) |
 | `make security-test` | Security tests en QEMU |
 | `make integration-test` | Integration tests en QEMU |
 | `make e2e-test` | E2E tests en QEMU |
-| `make test-all` | Suite completa (unit → stress/fuzz → boot → ACPI → security → integration → e2e) |
+| `make test-all` | Suite completa (unit → stress/fuzz → boot/PCIe → SMP → ACPI → security → integration → e2e) |
 | `make docs` | Genera API docs con `cargo doc` |

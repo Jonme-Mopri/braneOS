@@ -12,7 +12,7 @@ BUILD_FLAGS    := -Z build-std=core,compiler_builtins,alloc \
                   --target x86_64-unknown-none
 
 .PHONY: build build-release run run-release test fmt clippy \
-        stress-test test-image boot-test smp-test acpi-test security-test integration-test e2e-test test-all \
+        stress-test test-image boot-test pcie-test smp-test acpi-test security-test integration-test e2e-test test-all \
         docs iso iso-test release-test release parallels-deploy parallels-start parallels-stop parallels-status clean help
 
 # --- Build -------------------------------------------------------------------
@@ -62,6 +62,9 @@ test-image: build-release ## Build the shared release-kernel image used by QEMU 
 boot-test: test-image ## Run automated release-kernel boot test in QEMU (60 s timeout)
 	python3 tests/boot/test_boot.py --img $(TEST_IMAGE)
 
+pcie-test: test-image ## Boot Q35 and verify ACPI MCFG + PCIe ECAM discovery
+	python3 tests/boot/test_boot.py --img $(TEST_IMAGE) --machine q35
+
 smp-test: test-image ## Boot with four vCPUs and verify AP startup and IPI probe
 	python3 tests/boot/test_boot.py --img $(TEST_IMAGE) --cpus 4
 
@@ -80,7 +83,7 @@ e2e-test: test-image ## E2E tests: brsh commands + full boot flow verification
 	python3 tests/e2e/test_brsh_commands.py --no-inject --img $(TEST_IMAGE)
 	python3 tests/e2e/test_full_boot_flow.py --img $(TEST_IMAGE)
 
-test-all: test stress-test boot-test smp-test acpi-test security-test integration-test e2e-test ## Full test suite (unit → stress/fuzz → boot → SMP → ACPI → security → integration → e2e)
+test-all: test stress-test boot-test pcie-test smp-test acpi-test security-test integration-test e2e-test ## Full test suite (unit → stress/fuzz → boot/PCIe → SMP → ACPI → security → integration → e2e)
 	@echo ""
 	@echo "  \033[32mAll test suites passed ✓\033[0m"
 

@@ -657,22 +657,33 @@ pub trait Driver: Send + Sync {
 | Disk (virtio-blk) | ✅ Legacy | PCI | Virtqueue por polling y DMA bajo 4 GiB |
 | Disk (USB) | 🔲 Pendiente | — | Requiere xHCI y USB mass storage |
 | Network (virtio-net) | ✅ Base integrada | PCI | Discovery compartido + transporte legacy I/O |
-| USB | 🔲 Futuro | — | Para dispositivos externos |
+| USB/xHCI | 🔄 Enumeración base | Polling | Reset de host/puerto, Command/Event Rings, slot, contextos y Address Device sobre PCIe MMIO |
 | Bluetooth | 🔲 Futuro | — | Para mobile companion |
 
 ### 7.3 Inventario PCI
 
-`pci.rs` implementa Configuration Mechanism #1 con el par CF8/CFC protegido por
-un spinlock global, de modo que dos CPUs no pueden intercalar dirección y datos.
-El walker parte del bus raíz, sigue bridges PCI-to-PCI, inspecciona hasta ocho
-funciones cuando el header marca un dispositivo multifunción y conserva hasta
-256 funciones en almacenamiento estático. Cada descriptor incluye clase,
-subclase, IRQ, subsystem IDs y seis BAR decodificados como I/O, MMIO32 o MMIO64.
-El inventario se llena in-place para no consumir el stack pequeño de boot.
+`pci.rs` prefiere PCIe ECAM cuando ACPI entrega una tabla MCFG válida y conserva
+Configuration Mechanism #1 (CF8/CFC) como fallback determinista. El parser
+limita MCFG a 4 KiB y ocho regiones, valida checksum, alineación de 1 MiB,
+rangos de bus y solapamientos. La enumeración actual usa el segmento cero; cada
+BDF se traduce a su página física de configuración de 4 KiB y se mapea bajo
+demanda en una ventana virtual dedicada con `PRESENT`, `WRITABLE`, `NO_EXECUTE`
+y `NO_CACHE`. Así no se consume de antemano el aperture ECAM completo.
 
-La abstracción `PciConfigAccess` permite probar topologías y BARs con config
-space en memoria. El backend ECAM/MCFG y el mapeo MMIO con tamaños obtenidos por
-probe forman el siguiente incremento de PCIe.
+Ambos backends están protegidos por un spinlock global para evitar accesos
+intercalados. El walker parte del bus raíz, sigue bridges PCI-to-PCI, inspecciona
+hasta ocho funciones en dispositivos multifunción y conserva hasta 256
+funciones en almacenamiento estático. Cada descriptor incluye clase, subclase,
+IRQ, subsystem IDs y seis BAR decodificados como I/O, MMIO32 o MMIO64. La ruta
+ECAM admite el espacio extendido de 4 KiB y escribe el registro Command de 16
+bits, funcionalidad cubierta en Q35 manteniendo virtio-blk operativo.
+
+La abstracción `PciConfigAccess` permite probar topologías, BARs y MCFG con
+config space en memoria. El inventario mide los BAR desactivando temporalmente
+la decodificación del dispositivo y restaura todos los registros incluso ante
+errores. Las apertures MMIO verificadas se instalan en una ventana virtual
+acotada con páginas `NO_CACHE`/`NO_EXECUTE`, reutilizando duplicados exactos y
+rechazando aliases solapados.
 
 ### 7.4 Block layer
 
@@ -693,7 +704,10 @@ pub trait BlockDevice: Send + Sync {
 operación al driver hasta verificar geometría, múltiplos del tamaño de bloque,
 overflow de LBA, límites y política read-only. Los backends sincronizan su
 controlador internamente, lo que permite llamadas desde CPUs diferentes sin
-exponer detalles de virtqueue, USB o DMA al VFS/FAT32.
+exponer detalles de virtqueue, USB o DMA al VFS/FAT32. Un
+`BlockDeviceHandle` validado permite que un filesystem conserve una referencia
+estable al driver sin mantener bloqueado el registry durante una operación de
+I/O.
 
 ### 7.5 DMA y virtio-blk
 
@@ -709,6 +723,44 @@ publica una solicitud, notifica la queue 0 y espera de forma acotada su entrada
 used. Un mutex por dispositivo serializa la virtqueue sin bloquear el inventario
 PCI. MSI/MSI-X, colas múltiples y el transporte virtio 1.0 moderno permanecen
 como incrementos posteriores.
+
+### 7.6 xHCI base
+
+`xhci.rs` descubre el host controller por clase PCI, mapea su BAR0 y valida el
+capability header, offsets operacionales/runtime/doorbell y tamaño de página.
+La inicialización espera `CNR=0`, garantiza `HCHalted`, ejecuta `HCRST` con
+timeout y reserva estructuras físicamente contiguas: scratchpads opcionales,
+DCBAA, Command Ring cíclico, Event Ring y ERST. El controlador opera inicialmente
+por polling, sin habilitar MSI/MSI-X.
+
+Una sonda `No Op Command` comprueba en Q35 que el controlador consume el TRB
+publicado mediante su doorbell, produce un `Command Completion Event` exitoso
+y acepta el avance de ERDP. El productor del Command Ring y el consumidor del
+Event Ring mantienen índice y cycle bit, por lo que pueden ignorar de forma
+segura un `Port Status Change Event` intercalado.
+
+Las Extended Capabilities `Supported Protocol` describen qué puertos pertenecen
+a USB 2 o USB 3 y qué Slot Type usar. El primer puerto conectado se resetea por
+`PORTSC`; después `Enable Slot` devuelve el Slot ID y el kernel crea Device
+Context, Input Context y el Transfer Ring de EP0 según `HCCPARAMS1.CSZ`. Tras
+publicar el Device Context en DCBAA, `Address Device` completa la primera
+enumeración real de un teclado `usb-kbd` en Q35. Siguen pendientes las
+transferencias de control, los descriptores USB/HID y el endpoint interrupt IN.
+
+### 7.7 FAT32 read-only
+
+`fat32.rs` consume un `BlockDeviceHandle` de 512 bytes por bloque y descubre
+volúmenes FAT32 tanto en LBA0 como dentro de una partición MBR de tipo FAT32.
+Antes del montaje valida el BPB, el tamaño de la región FAT, el rango de datos,
+el cluster raíz y la capacidad anunciada por el dispositivo. El recorrido de
+clusters está acotado por la geometría para que una cadena corrupta no produzca
+un bucle infinito.
+
+La primera superficie VFS soporta `stat`, `readdir` y `read` con offset para
+rutas 8.3 case-insensitive; omite entradas LFN y etiquetas de volumen, y rechaza
+mutaciones porque el filesystem es de solo lectura. Durante el boot, el primer
+volumen válido se monta en `/disk` y una lectura de `/disk/README.TXT` valida la
+ruta completa VFS → FAT32 → block layer → virtio-blk → DMA.
 
 ---
 

@@ -279,6 +279,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: PCIe ECAM Test (Q35)
+            suite: pcie
+            target: pcie-test
+            boot_timeout: "60"
           - name: ACPI S3 Test (QEMU)
             suite: acpi
             target: acpi-test

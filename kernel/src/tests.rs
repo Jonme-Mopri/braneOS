@@ -508,7 +508,12 @@ mod context_tests {
     fn new_task_context_rsp_below_stack_top() {
         let stack_top: u64 = 0xFFFF_8000_0001_0000;
         let ctx = TaskContext::new_task(stack_top, 0x1000);
-        assert!(ctx.rsp < stack_top, "RSP must be below stack top");
+        assert_eq!(ctx.rsp, stack_top - 16);
+        assert_eq!(
+            (ctx.rsp + 8) % 16,
+            8,
+            "restored entry must satisfy the System V stack convention"
+        );
     }
 
     #[test]
@@ -664,7 +669,7 @@ mod scheduler_context_tests {
     }
 }
 // -----------------------------------------------------------------------
-// FAT32 stub tests
+// FAT32 parser tests
 // -----------------------------------------------------------------------
 
 #[cfg(test)]

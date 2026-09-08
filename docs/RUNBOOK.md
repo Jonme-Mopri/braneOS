@@ -1,6 +1,6 @@
 # RUNBOOK.md - Build, CI y ejecucion local
 
-> Estado: operativo para desarrollo local. Última actualización: 2026-09-01.
+> Estado: operativo para desarrollo local. Última actualización: 2026-09-06.
 > Este documento describe el flujo
 > actual del repositorio, no el release final instalable.
 
@@ -19,7 +19,7 @@ El arranque actual inicializa:
 - scheduler cooperativo,
 - syscalls e IPC,
 - capacidades, auditoria y loader de modulos,
-- inventario PCI, block layer y un backend virtio-blk legacy,
+- inventario PCI, block layer, virtio-blk legacy y FAT32 read-only en `/disk`,
 - Brane Protocol, IA observadora, VFS, RamFS, TTY, shell, red, sockets y DNS.
 
 El sistema entra en `brsh` y queda esperando entrada por TTY.
@@ -43,10 +43,19 @@ rondas y respuestas. El BSP usa el mismo aislamiento cuando `brsh` ejecuta
 
 Para reproducirlo con cuatro vCPU: `make smp-test`.
 
-Durante la fase 9 del arranque, `PCI Enumeration` recorre buses, funciones
-múltiples y bridges mediante CF8/CFC. El runner y los boot tests conectan un
-disco virtio read-only de 1 MiB; el kernel reserva la virtqueue en DMA contiguo,
-registra `virtio-blk0` y completa una lectura de LBA0 antes de iniciar `brsh`.
+Durante la fase 9 del arranque, `PCI Enumeration` usa PCIe ECAM si ACPI entrega
+una MCFG válida; en plataformas sin ella vuelve automáticamente a CF8/CFC. La
+ruta ECAM mapea solo la página de configuración de cada función descubierta. Los
+boot tests conectan un disco FAT32 virtio read-only disperso de 64 MiB; el
+kernel reserva la virtqueue en DMA contiguo, registra `virtio-blk0`, monta el
+volumen en `/disk` y lee `README.TXT` mediante el VFS antes de iniciar `brsh`.
+`make pcie-test` usa Q35 y exige MCFG/ECAM; `make boot-test` cubre el fallback
+legacy con la máquina QEMU predeterminada. La variante Q35 también conecta un
+host `qemu-xhci`, ejecuta su reset, configura DCBAA y Command/Event Rings y
+exige completar una sonda `No Op` por DMA antes de continuar el boot. También
+conecta `usb-kbd`, resetea su root port, reserva slot/contextos y exige que
+`Address Device` termine correctamente; la lectura de reportes HID todavía no
+forma parte de este corte.
 
 ---
 
@@ -146,9 +155,11 @@ En el log serial deberia aparecer:
 Brane OS v0.1 — Kernel Booting
 ...
 [pci]  Enumeration complete: 7 function(s) across 1 bus(es), overflow=false
-[block] virtio-blk0 ready: id=1, sectors=2048, bytes=1048576, read_only=true
+[block] virtio-blk0 ready: id=1, sectors=131072, bytes=67108864, read_only=true
 [block] Block layer ready: 1 registered device(s).
 [block] LBA0 read probe: ok
+[fat32] Volume ready: device=1, label=BRANEOS, partition_lba=0, root_cluster=2
+[fat32] Read probe: /disk/README.TXT ok
 ...
 Brane OS v0.1 — Boot Complete
 ...
@@ -158,7 +169,8 @@ brane>
 ```
 
 Desde `brsh`, `pci` lista las funciones y BAR descubiertos; `block` lista los
-dispositivos registrados y su geometría.
+dispositivos registrados y su geometría. `ls /disk`, `ls /disk/DOCS`,
+`cat /disk/README.TXT` y `cat /disk/DOCS/HELLO.TXT` recorren el volumen FAT32.
 
 ---
 
@@ -178,17 +190,18 @@ make release-test VERSION=dev
 - kernel bare-metal con `-D warnings`,
 - runner host con `-D warnings`.
 
-`make test-all` ejecuta unit, stress/mutation-fuzz, boot, ACPI S3, security,
-integration y E2E. Los targets QEMU comparten una imagen del kernel release —el
+`make test-all` ejecuta unit, stress/mutation-fuzz, boot legacy, PCIe ECAM, SMP,
+ACPI S3, security, integration y E2E. Los targets QEMU comparten una imagen del kernel release —el
 ELF debug excede el timeout de carga del bootloader BIOS bajo TCG— y detectan el
 prompt `brane>` aunque no termine con salto de línea.
 
 `make release-test` valida además los artefactos versionados y arranca la ISO
 UEFI con OVMF.
 
-Los targets `boot-test`, `smp-test` e `iso-test` crean un disco temporal
+Los targets `boot-test`, `pcie-test`, `smp-test` e `iso-test` crean un disco FAT32 temporal
 independiente del medio de arranque y fuerzan `disable-modern=on`. Además del
-prompt, exigen el registro de `virtio-blk0` y una transferencia DMA completa.
+prompt, exigen el registro de `virtio-blk0`, una transferencia DMA, el montaje
+en `/disk` y la lectura del archivo de prueba mediante el VFS.
 
 `make stress-test` usa semillas fijas para mutar los parsers FAT32, BDP y Brane
 Session, comparar el frame allocator con un modelo de referencia y saturar las
@@ -218,6 +231,7 @@ Jobs actuales:
 | Stress and Fuzz Tests | `make stress-test` (incluye dispatcher SMP concurrente) |
 | Release Artifact (ISO) | `make iso-test VERSION=ci` |
 | Boot Test (QEMU) | `python3 tests/boot/test_boot.py` |
+| PCIe ECAM Test (Q35) | `make pcie-test` |
 | ACPI S3 Test (QEMU/QMP) | `make acpi-test` |
 | Security Tests (QEMU) | `make security-test` |
 | Integration Tests (QEMU) | `make integration-test` |

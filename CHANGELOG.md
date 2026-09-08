@@ -33,6 +33,9 @@ All notable changes to Brane OS are documented here. The project follows
 - Synchronous legacy virtio-blk driver with PCI bus mastering, feature
   negotiation, a polling virtqueue, 512-byte bounce buffer and block-registry
   integration. QEMU boot tests verify a real LBA0 transfer with 1 and 4 vCPUs.
+- xHCI host initialization with scratchpads, DCBAA, persistent command/event
+  rings, Supported Protocol discovery and root-port reset. The Q35 test attaches
+  a USB keyboard and verifies Enable Slot plus Address Device using DMA contexts.
 
 ## 0.1.0 — Foundation
 
@@ -49,6 +52,7 @@ All notable changes to Brane OS are documented here. The project follows
 
 - Live migration of a context that has already run remains disabled; tasks may
   be balanced before dispatch or pinned by affinity.
-- USB xHCI, USB mass storage and modern virtio PCI transport remain planned for
-  Phase 13; the current virtio-blk backend uses the transitional legacy path.
-- FAT32 support currently provides structural parsing rather than full reads.
+- USB HID transfers, USB mass storage and modern virtio PCI transport remain
+  planned for Phase 13; xHCI currently addresses the first device by polling.
+- FAT32 is read-only and supports 8.3 names; LFN and write operations remain
+  unimplemented.

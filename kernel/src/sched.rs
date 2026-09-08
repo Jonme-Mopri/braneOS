@@ -586,7 +586,7 @@ pub fn complete_current_cpu() -> Option<TaskId> {
 /// The run-queue lock and task-table lock are held only while selecting task
 /// IDs and taking stable pointers. They are released before assembly runs.
 /// When the CPU has no successor, its saved per-CPU idle context is selected;
-/// this lets an AP return from an IPI handler instead of spinning forever
+/// this lets an AP return to its scheduler loop instead of spinning forever
 /// inside a task that is the only runnable entity.
 pub fn prepare_context_switch_for_cpu(
     cpu: usize,
@@ -619,7 +619,7 @@ pub fn prepare_context_switch_for_cpu(
         let mut state = slot.lock();
         let idle_context = &mut state.saved_context as *mut TaskContext;
 
-        // The first AP handoff saves the interrupted IPI handler into the
+        // The first AP handoff saves the normal AP scheduler loop into the
         // idle context. Subsequent handoffs reuse the slot as the return
         // continuation after a task yields.
         let old_ptr = previous
@@ -660,24 +660,6 @@ pub fn switch_current_cpu_context() -> bool {
     else {
         return false;
     };
-    #[cfg(target_os = "none")]
-    {
-        static TRACE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-        if TRACE.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
-            let old = unsafe { *old_ptr };
-            let new = unsafe { *new_ptr };
-            crate::serial_println!(
-                "[sched] context cpu={} old=0x{:X}/rsp=0x{:X}/rip=0x{:X} new=0x{:X}/rsp=0x{:X}/rip=0x{:X}",
-                crate::smp::current_cpu_index(),
-                old_ptr as usize,
-                old.rsp,
-                old.rip,
-                new_ptr as usize,
-                new.rsp,
-                new.rip,
-            );
-        }
-    }
     // SAFETY: pointers refer to static scheduler task slots or the static
     // per-CPU idle context; both remain allocated for the kernel lifetime.
     // Keep interrupts masked across the save/restore window so an IPI cannot
@@ -703,8 +685,8 @@ pub fn timer_tick_for_cpu(cpu: usize) -> DispatchResult {
         slot.lock().timer_ticks += 1;
 
         // The legacy BSP scheduler still owns its cooperative task cursor.
-        // APs use only their per-CPU run queue until isolated context
-        // switching lands.
+        // APs use their per-CPU run queues and private saved contexts. The BSP
+        // keeps the legacy cooperative cursor until both paths are unified.
         if cpu == 0 {
             // Interrupt handlers must never spin on a lock held by the
             // interrupted context. If the BSP is already updating a task

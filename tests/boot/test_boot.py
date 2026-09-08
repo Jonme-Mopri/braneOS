@@ -28,6 +28,7 @@ import time
 import shutil
 import tempfile
 from pathlib import Path
+from typing import BinaryIO
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -53,6 +54,8 @@ REQUIRED_STRINGS = [
     "[block] virtio-blk0 ready",  # Phase 13 hardware-backed block device
     "[block] Block layer ready: 1 registered device(s)",
     "[block] LBA0 read probe: ok",  # synchronous DMA/virtqueue transfer
+    "[fat32] Volume ready",  # block-backed FAT32 geometry and root directory
+    "[fat32] Read probe: /disk/README.TXT ok",  # FAT chain + VFS read path
     "brane>",     # brsh prompt (signals full userland init)
 ]
 
@@ -139,6 +142,105 @@ def warn(msg: str) -> None:
 def error(msg: str) -> None:
     print(f"[boot-test] \033[31mFAIL\033[0m  {msg}", flush=True)
 
+
+def write_fat32_test_disk(disk: BinaryIO) -> None:
+    """Create a deterministic sparse FAT32 superfloppy without host tools."""
+    sector_size = 512
+    total_sectors = 131_072
+    reserved_sectors = 32
+    fat_sectors = 1_024
+    data_sector = reserved_sectors + fat_sectors
+
+    def put_u16(target: bytearray, offset: int, value: int) -> None:
+        target[offset:offset + 2] = value.to_bytes(2, "little")
+
+    def put_u32(target: bytearray, offset: int, value: int) -> None:
+        target[offset:offset + 4] = value.to_bytes(4, "little")
+
+    def write_sector(lba: int, data: bytes | bytearray) -> None:
+        if len(data) != sector_size:
+            raise ValueError("FAT32 test sectors must be exactly 512 bytes")
+        disk.seek(lba * sector_size)
+        disk.write(data)
+
+    def directory_entry(name: bytes, attributes: int, cluster: int, data: bytes) -> bytes:
+        if len(name) != 11:
+            raise ValueError("FAT32 short name must contain exactly 11 bytes")
+        entry = bytearray(32)
+        entry[:11] = name
+        entry[11] = attributes
+        put_u16(entry, 20, cluster >> 16)
+        put_u16(entry, 26, cluster & 0xFFFF)
+        put_u32(entry, 28, len(data))
+        return bytes(entry)
+
+    disk.truncate(total_sectors * sector_size)
+
+    boot = bytearray(sector_size)
+    boot[0:3] = b"\xEB\x58\x90"
+    boot[3:11] = b"BRANEOS "
+    put_u16(boot, 11, sector_size)
+    boot[13] = 1
+    put_u16(boot, 14, reserved_sectors)
+    boot[16] = 1
+    boot[21] = 0xF8
+    put_u16(boot, 24, 63)
+    put_u16(boot, 26, 255)
+    put_u32(boot, 32, total_sectors)
+    put_u32(boot, 36, fat_sectors)
+    put_u32(boot, 44, 2)
+    put_u16(boot, 48, 1)
+    put_u16(boot, 50, 6)
+    boot[64] = 0x80
+    boot[66] = 0x29
+    put_u32(boot, 67, 0xB4A93201)
+    boot[71:82] = b"BRANEOS    "
+    boot[82:90] = b"FAT32   "
+    boot[510:512] = b"\x55\xAA"
+    write_sector(0, boot)
+    write_sector(6, boot)
+
+    fs_info = bytearray(sector_size)
+    put_u32(fs_info, 0, 0x41615252)
+    put_u32(fs_info, 484, 0x61417272)
+    put_u32(fs_info, 488, 0xFFFFFFFF)
+    put_u32(fs_info, 492, 0xFFFFFFFF)
+    put_u32(fs_info, 508, 0xAA550000)
+    write_sector(1, fs_info)
+
+    fat = bytearray(sector_size)
+    for cluster, value in ((0, 0x0FFFFFF8), (1, 0x0FFFFFFF), (2, 0x0FFFFFFF),
+                           (3, 6), (4, 0x0FFFFFFF), (5, 0x0FFFFFFF),
+                           (6, 0x0FFFFFFF)):
+        put_u32(fat, cluster * 4, value)
+    write_sector(reserved_sectors, fat)
+
+    readme_prefix = b"Brane OS FAT32 block path ready.\n"
+    readme_tail = b"FAT32-CHAIN-OK\n"
+    readme = readme_prefix + b" " * (sector_size - len(readme_prefix)) + readme_tail
+    hello = b"hello from a nested FAT32 directory\n"
+    root = bytearray(sector_size)
+    root[0:32] = directory_entry(b"README  TXT", 0x20, 3, readme)
+    root[32:64] = directory_entry(b"DOCS       ", 0x10, 4, b"")
+    write_sector(data_sector, root)
+
+    readme_sector = bytearray(sector_size)
+    readme_sector[:] = readme[:sector_size]
+    write_sector(data_sector + 1, readme_sector)
+
+    docs = bytearray(sector_size)
+    docs[0:32] = directory_entry(b"HELLO   TXT", 0x20, 5, hello)
+    write_sector(data_sector + 2, docs)
+
+    hello_sector = bytearray(sector_size)
+    hello_sector[:len(hello)] = hello
+    write_sector(data_sector + 3, hello_sector)
+
+    readme_tail_sector = bytearray(sector_size)
+    readme_tail_sector[:len(readme_tail)] = readme_tail
+    write_sector(data_sector + 4, readme_tail_sector)
+    disk.flush()
+
 # ---------------------------------------------------------------------------
 # Build step
 # ---------------------------------------------------------------------------
@@ -206,13 +308,30 @@ def build_disk_image(kernel_path: Path) -> Path:
 # QEMU runner
 # ---------------------------------------------------------------------------
 
-def run_qemu_test(media_path: Path, timeout: int, media_type: str = "disk", cpus: int = 1) -> int:
+def run_qemu_test(
+    media_path: Path,
+    timeout: int,
+    media_type: str = "disk",
+    cpus: int = 1,
+    machine: str | None = None,
+) -> int:
     """
     Launch QEMU with the given disk image or ISO, capture serial output,
     and return 0 (pass), 1 (fail).
     """
     cmd = [QEMU_BIN, "-m", "256M", "-smp", str(cpus)]
+    if machine:
+        cmd.extend(["-machine", machine])
     required_strings = list(REQUIRED_STRINGS)
+    if machine == "q35":
+        required_strings.extend([
+            "[acpi] MCFG:",
+            "[pci]  Config backend: Ecam",
+            "[xhci] Controller ready:",
+            "[xhci] Runtime ready: reset=ok, running=true, command_probe=ok",
+            "[xhci] Ports ready: protocols=2, connected=1",
+            "[xhci] Device addressed: slot=1",
+        ])
     if cpus > 1:
         required_strings.extend([
             f"[smp] CPU boot plan ready: {cpus} enabled CPU(s)",
@@ -247,12 +366,16 @@ def run_qemu_test(media_path: Path, timeout: int, media_type: str = "disk", cpus
     # implemented by the Phase 13 driver.
     with tempfile.NamedTemporaryFile(prefix="brane-virtio-blk-", suffix=".img", delete=False) as disk:
         block_path = Path(disk.name)
-        disk.write(b"BRANE-BLOCK-TEST")
-        disk.truncate(1024 * 1024)
+        write_fat32_test_disk(disk)
     cmd.extend([
         "-drive", f"if=none,format=raw,readonly=on,file={block_path},id=braneblk",
         "-device", "virtio-blk-pci,drive=braneblk,disable-modern=on",
     ])
+    if machine == "q35":
+        cmd.extend([
+            "-device", "qemu-xhci,id=branexhci",
+            "-device", "usb-kbd,bus=branexhci.0",
+        ])
     cmd.extend([
         "-serial", "stdio",
         "-nographic",         # no display window — pure serial I/O
@@ -384,6 +507,8 @@ def parse_args() -> argparse.Namespace:
                    help="Skip build step; use KERNEL_BIN_PATH env var or pre-existing image")
     p.add_argument("--cpus", type=int, default=1,
                    help="Number of virtual CPUs for QEMU (default: 1)")
+    p.add_argument("--machine", choices=("pc", "q35"), default=None,
+                   help="QEMU machine type; q35 validates the PCIe ECAM path")
     media = p.add_mutually_exclusive_group()
     media.add_argument("--img", type=str, default=None,
                        help="Path to existing .img file, skips build entirely")
@@ -422,7 +547,7 @@ def main() -> None:
         kernel_path = build_kernel()
         img_path = build_disk_image(kernel_path)
 
-    rc = run_qemu_test(img_path, args.timeout, media_type, args.cpus)
+    rc = run_qemu_test(img_path, args.timeout, media_type, args.cpus, args.machine)
 
     elapsed = time.monotonic() - start
     info(f"Total elapsed: {elapsed:.1f}s")

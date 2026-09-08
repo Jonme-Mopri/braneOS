@@ -14,12 +14,12 @@
 **Estado del proyecto:**  
 - [x] Idea
 - [x] Diseño conceptual
-- [ ] Prototipo de boot
-- [ ] Kernel mínimo
-- [ ] User space inicial
-- [ ] Seguridad base
-- [ ] IA observadora
-- [ ] IA actuadora restringida
+- [x] Prototipo de boot
+- [x] Kernel mínimo
+- [x] User space inicial
+- [x] Seguridad base
+- [x] IA observadora
+- [x] IA actuadora restringida
 
 ---
 

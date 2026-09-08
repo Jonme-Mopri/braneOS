@@ -103,6 +103,39 @@ struct RegisteredBlockDevice {
     device: &'static dyn BlockDevice,
 }
 
+/// Copyable, validated reference to a registered block device.
+///
+/// Filesystems keep this handle after discovery so normal reads do not need
+/// to hold the global registry lock while a controller performs I/O.
+#[derive(Clone, Copy)]
+pub struct BlockDeviceHandle {
+    info: BlockDeviceInfo,
+    device: &'static dyn BlockDevice,
+}
+
+impl BlockDeviceHandle {
+    pub const fn info(&self) -> BlockDeviceInfo {
+        self.info
+    }
+
+    pub fn read(&self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+        validate_transfer(self.info, lba, buffer.len())?;
+        self.device.read_blocks(lba, buffer)
+    }
+
+    pub fn write(&self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        if self.info.read_only {
+            return Err(BlockError::ReadOnly);
+        }
+        validate_transfer(self.info, lba, data.len())?;
+        self.device.write_blocks(lba, data)
+    }
+
+    pub fn flush(&self) -> Result<(), BlockError> {
+        self.device.flush()
+    }
+}
+
 /// Fixed-capacity registry and checked dispatch surface.
 pub struct BlockRegistry {
     devices: [Option<RegisteredBlockDevice>; MAX_BLOCK_DEVICES],
@@ -170,6 +203,15 @@ impl BlockRegistry {
         self.find(id).map(|registered| registered.info)
     }
 
+    /// Obtain a stable device handle without extending the registry lock over
+    /// controller I/O. Registered drivers have static kernel lifetime.
+    pub fn handle(&self, id: BlockDeviceId) -> Option<BlockDeviceHandle> {
+        self.find(id).map(|registered| BlockDeviceHandle {
+            info: registered.info,
+            device: registered.device,
+        })
+    }
+
     pub fn snapshot(&self) -> [Option<BlockDeviceInfo>; MAX_BLOCK_DEVICES] {
         let mut snapshot = [None; MAX_BLOCK_DEVICES];
         for (index, registered) in self.devices[..self.count].iter().flatten().enumerate() {
@@ -179,23 +221,19 @@ impl BlockRegistry {
     }
 
     pub fn read(&self, id: BlockDeviceId, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
-        let registered = self.find(id).ok_or(BlockError::InvalidDevice)?;
-        validate_transfer(registered.info, lba, buffer.len())?;
-        registered.device.read_blocks(lba, buffer)
+        self.handle(id)
+            .ok_or(BlockError::InvalidDevice)?
+            .read(lba, buffer)
     }
 
     pub fn write(&self, id: BlockDeviceId, lba: u64, data: &[u8]) -> Result<(), BlockError> {
-        let registered = self.find(id).ok_or(BlockError::InvalidDevice)?;
-        if registered.info.read_only {
-            return Err(BlockError::ReadOnly);
-        }
-        validate_transfer(registered.info, lba, data.len())?;
-        registered.device.write_blocks(lba, data)
+        self.handle(id)
+            .ok_or(BlockError::InvalidDevice)?
+            .write(lba, data)
     }
 
     pub fn flush(&self, id: BlockDeviceId) -> Result<(), BlockError> {
-        let registered = self.find(id).ok_or(BlockError::InvalidDevice)?;
-        registered.device.flush()
+        self.handle(id).ok_or(BlockError::InvalidDevice)?.flush()
     }
 
     fn find(&self, id: BlockDeviceId) -> Option<&RegisteredBlockDevice> {

@@ -51,6 +51,7 @@ pub mod usermode;
 pub mod vfs;
 pub mod virtio;
 pub mod virtio_block;
+pub mod xhci;
 
 #[cfg(test)]
 mod tests;

@@ -33,6 +33,9 @@ const FADT_X_PM1B_CNT_END: usize = 196;
 
 const FACS_MIN_LEN: usize = 24;
 const MADT_MAX_LEN: usize = 4096;
+const MCFG_MIN_LEN: usize = 44;
+const MCFG_MAX_LEN: usize = 4096;
+const ACPI_MAX_TABLE_LEN: usize = 1024 * 1024;
 #[cfg(target_os = "none")]
 const FACS_FIRMWARE_WAKING_VECTOR_OFFSET: usize = 12;
 #[cfg(target_os = "none")]
@@ -155,6 +158,7 @@ pub struct AcpiInfo {
     pub initialized: bool,
     pub apic: Option<crate::apic::ApicTopology>,
     pub smp: Option<crate::smp::CpuBootPlan>,
+    pub ecam: crate::pci::EcamRegions,
     pub s1_supported: bool,
     pub s3_supported: bool,
     pub s4_supported: bool,
@@ -180,6 +184,7 @@ struct AcpiState {
     initialized: bool,
     apic: Option<crate::apic::ApicTopology>,
     smp: Option<crate::smp::CpuBootPlan>,
+    ecam: crate::pci::EcamRegions,
     pm1a_evt_blk: Option<u64>,
     pm1b_evt_blk: Option<u64>,
     pm1a_cnt_blk: Option<u64>,
@@ -200,6 +205,7 @@ static ACPI_STATE: Mutex<AcpiState> = Mutex::new(AcpiState {
     initialized: false,
     apic: None,
     smp: None,
+    ecam: crate::pci::EcamRegions::new(),
     pm1a_evt_blk: None,
     pm1b_evt_blk: None,
     pm1a_cnt_blk: None,
@@ -369,6 +375,37 @@ pub fn init(rsdp_phys_addr: u64, physical_memory_offset: u64) {
     } else {
         crate::serial_println!("[acpi] MADT (APIC) table not found; SMP disabled.");
     }
+
+    let mcfg_addr = if rsdp.revision >= 2 && rsdp.xsdt_address != 0 {
+        find_table_address(
+            physical_memory_offset + rsdp.xsdt_address,
+            physical_memory_offset,
+            8,
+            b"XSDT",
+            b"MCFG",
+        )
+    } else {
+        None
+    }
+    .or_else(|| {
+        (rsdp.rsdt_address != 0).then(|| {
+            find_table_address(
+                physical_memory_offset + rsdp.rsdt_address as u64,
+                physical_memory_offset,
+                4,
+                b"RSDT",
+                b"MCFG",
+            )
+        })?
+    });
+    let ecam = mcfg_addr
+        .and_then(|address| parse_mcfg(address, physical_memory_offset))
+        .unwrap_or_default();
+    if ecam.is_empty() {
+        crate::serial_println!("[acpi] MCFG unavailable; PCI will use legacy config access.");
+    } else {
+        crate::serial_println!("[acpi] MCFG: {} ECAM region(s) validated.", ecam.len());
+    }
     let fadt_len = fadt.header.length as usize;
 
     let (pm1a_evt, pm1b_evt, evt_is_io) = event_registers(fadt, fadt_len);
@@ -389,6 +426,7 @@ pub fn init(rsdp_phys_addr: u64, physical_memory_offset: u64) {
         initialized: true,
         apic: apic_topology,
         smp: smp_plan,
+        ecam,
         pm1a_evt_blk: nonzero(pm1a_evt),
         pm1b_evt_blk: nonzero(pm1b_evt),
         pm1a_cnt_blk: nonzero(pm1a_cnt),
@@ -417,6 +455,23 @@ pub fn init(rsdp_phys_addr: u64, physical_memory_offset: u64) {
 
 fn nonzero(value: u64) -> Option<u64> {
     (value != 0).then_some(value)
+}
+
+fn parse_mcfg(table_phys: u64, physical_memory_offset: u64) -> Option<crate::pci::EcamRegions> {
+    let table_virt = physical_memory_offset.checked_add(table_phys)?;
+    let length = unsafe { core::ptr::read_unaligned((table_virt + 4) as *const u32) } as usize;
+    if !(MCFG_MIN_LEN..=MCFG_MAX_LEN).contains(&length) {
+        crate::serial_println!("[acpi] MCFG invalid: length outside supported bounds.");
+        return None;
+    }
+    let table = unsafe { core::slice::from_raw_parts(table_virt as *const u8, length) };
+    match crate::pci::EcamRegions::parse_mcfg(table) {
+        Ok(regions) => Some(regions),
+        Err(error) => {
+            crate::serial_println!("[acpi] MCFG invalid: {:?}.", error);
+            None
+        }
+    }
 }
 
 fn find_fadt(
@@ -491,7 +546,7 @@ fn find_table_address(
         let header = unsafe { &*(entry_virt as *const DescriptionHeader) };
         let header_len = header.length as usize;
         if &header.signature == wanted
-            && header_len >= DESCRIPTION_HEADER_LEN
+            && (DESCRIPTION_HEADER_LEN..=ACPI_MAX_TABLE_LEN).contains(&header_len)
             && verify_checksum(entry_virt as *const u8, header_len)
         {
             return Some(entry_phys);
@@ -887,6 +942,7 @@ pub fn info() -> AcpiInfo {
         initialized: state.initialized,
         apic: state.apic,
         smp: state.smp,
+        ecam: state.ecam,
         s1_supported: state.sleep_types[1].is_some(),
         s3_supported: state.sleep_types[3].is_some(),
         s4_supported: state.sleep_types[4].is_some(),

@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §19.  
 > Estado: **Activo** — se actualiza conforme el proyecto avanza.  
-> Última actualización: **2026-09-01**
+> Última actualización: **2026-09-07**
 
 ---
 
@@ -18,7 +18,8 @@
  ─────────────────────────────────────────────────────┼─────────────────────────────────────────────────▶
 ```
 
-**Foco actual:** Fase 13 — lecturas FAT32 reales sobre la block layer y preparación xHCI.
+**Foco actual:** Fase 13 — completar transferencias de control USB, leer los
+descriptores del teclado HID y habilitar su endpoint de interrupción.
 
 ### Disciplina de cambios por fase
 
@@ -44,7 +45,7 @@ completada cuando satisface su criterio de salida.
 | Keyboard (PS/2) | ✅ | Scancode decoding con `pc-keyboard` |
 | Timer interrupt | ✅ | PIT ~18.2 Hz |
 | Makefile + QEMU runner | ✅ | `build`, `run`, `test`, `clean` |
-| GitHub Actions CI | ✅ | 10 checks: build, calidad, unit, stress/fuzz y cinco suites QEMU |
+| GitHub Actions CI | ✅ | 12 checks: build, calidad, unit, stress/fuzz y seis suites QEMU |
 | Documentación base | ✅ | ARCHITECTURE, SECURITY_MODEL, AI_SUBSYSTEM, ROADMAP, TEST_PLAN |
 
 ---
@@ -129,7 +130,7 @@ completada cuando satisface su criterio de salida.
 | TTY driver | ✅ | ALTA | Input ring buffer + dual output (serial+fb) |
 | `brsh` (Shell mínima) | ✅ | ALTA | 20 comandos + alias `sleep` y `poweroff` |
 | `initramfs` | ✅ | MEDIA | Imagen de boot dinámica en RamFS (/etc/motd, etc.) |
-| FAT32 (base) | ✅ | BAJA | Stub VFS + parseo de MBR/BootSector; lectura real pasa a Fase 13 |
+| FAT32 (base) | ✅ | BAJA | Parser MBR/BPB inicial; lectura block-backed completada en Fase 13 |
 
 ---
 
@@ -269,20 +270,20 @@ físico se mantiene en la matriz de release de la Fase 11.
 
 ---
 
-## 🔲 Fase 13 — Hardware I/O y Almacenamiento
+## 🔄 Fase 13 — Hardware I/O y Almacenamiento
 
 **Objetivo:** Ampliar compatibilidad con periféricos y almacenamiento real.
 
 | Componente | Estado | Prioridad | Dependencia |
 |-----------|--------|-----------|-------------|
-| Enumeración PCI/PCIe robusta | 🔄 | ALTA | CF8/CFC, bridges, multifunction y BAR 32/64; falta ECAM y mapping MMIO |
+| Enumeración PCI/PCIe robusta | ✅ | ALTA | ECAM/MCFG con fallback CF8/CFC, bridges, multifunction, BAR 32/64 y apertures MMIO medidas/mapeadas |
 | MSI/MSI-X | 🔲 | MEDIA | APIC |
-| Controlador xHCI | 🔲 | ALTA | PCIe + DMA |
+| Controlador xHCI | 🔄 | ALTA | Supported Protocol/PORTSC, reset de puerto, slot, contextos y Address Device listos; faltan transferencias USB e interrupciones |
 | USB HID | 🔲 | ALTA | xHCI; teclado y ratón |
 | USB mass storage | 🔲 | MEDIA | xHCI + block layer |
 | Block layer | ✅ | ALTA | Trait, registry, validación I/O y primer backend real |
 | DMA + virtio-blk legacy | ✅ | ALTA | Frames contiguos <4 GiB, virtqueue y lectura sectorial en QEMU |
-| FAT32 de lectura real | 🔲 | MEDIA | Block layer; reemplaza el stub actual |
+| FAT32 de lectura real | ✅ | MEDIA | MBR/superfloppy, cadenas de clusters, directorios 8.3 y montaje VFS read-only |
 
 **Criterio de salida:** teclado USB y almacenamiento masivo funcionan en QEMU
 y en al menos una máquina física soportada.
@@ -299,10 +300,53 @@ ambos inventarios en `brsh`.
 **Segundo corte completado:** `dma.rs` reserva regiones físicamente contiguas y
 alineadas bajo 4 GiB. `virtio_block.rs` negocia el transporte legacy, habilita
 bus mastering PCI, configura una virtqueue protegida por CPU y ejecuta I/O
-sectorial mediante un bounce buffer. El boot test conecta un disco read-only de
-1 MiB, registra `virtio-blk0` con 2048 sectores y exige una lectura correcta de
-LBA0; la misma ruta supera QEMU/TCG con 1 y 4 vCPU. El siguiente corte conecta
-el parser FAT32 a este dispositivo y recorre directorios/archivos reales.
+sectorial mediante un bounce buffer. El boot test conecta un disco read-only,
+registra `virtio-blk0` y exige una lectura correcta de LBA0; la misma ruta
+supera QEMU/TCG con 1 y 4 vCPU.
+
+**Tercer corte completado:** `fat32.rs` valida geometría FAT32 en discos con MBR
+o formato superfloppy, sigue cadenas FAT con límites anticorrupción, resuelve
+rutas 8.3 sin distinguir mayúsculas y expone `stat`, `readdir` y lectura con
+offset mediante el VFS. El arranque monta el volumen read-only en `/disk`; el
+harness genera sin herramientas externas una imagen FAT32 dispersa de 64 MiB y
+exige leer `/disk/README.TXT` sobre la ruta virtio-blk/DMA real.
+
+**Cuarto corte completado:** ACPI valida la tabla MCFG y conserva hasta ocho
+regiones ECAM. El backend PCIe mapea bajo demanda una página de configuración
+por función, sin reservar todo el aperture, y usa accesos volátiles serializados
+para enumerar y actualizar el registro Command; si MCFG falta o falla, repite
+la enumeración por CF8/CFC. `make pcie-test` arranca Q35, exige el backend ECAM
+y mantiene la lectura FAT32 sobre virtio-blk.
+
+**Quinto corte completado:** el inventario PCI mide cada BAR con el protocolo
+de sizing y restaura atómicamente Command y registros de recursos. Las apertures
+MMIO se mapean en una ventana virtual acotada, sin aliases solapados y con páginas
+`NO_CACHE`/`NO_EXECUTE`; un fallo parcial revierte las páginas ya instaladas.
+`xhci.rs` descubre el controlador, habilita MMIO y bus mastering y valida
+CAPLENGTH, HCIVERSION y HCSPARAMS1 sin modificar todavía el estado operacional.
+`make pcie-test` conecta `qemu-xhci` en Q35 y exige el log `Controller ready`
+junto con la ruta virtio-blk/FAT32. Este resultado habilitó el reset y los
+anillos implementados en el sexto corte.
+
+**Sexto corte completado:** `xhci.rs` espera `CNR`, detiene de forma acotada el
+controlador, aplica `HCRST` y vuelve a esperar disponibilidad antes de escribir
+registros operacionales. Selecciona un `PAGESIZE` válido, reserva scratchpads
+cuando son necesarios y configura DCBAA, un Command Ring cíclico y un Event
+Ring de polling con su ERST. Tras arrancar el controlador, una sonda `No Op`
+recorre la ruta completa doorbell → Command Ring DMA → Command Completion Event
+y avanza ERDP. `make pcie-test` exige `reset=ok`, `running=true` y
+`command_probe=ok` en Q35. El siguiente corte analizará Supported Protocol,
+PORTSC y el ciclo Enable Slot/Address Device para el primer dispositivo USB.
+
+**Séptimo corte completado:** el controlador recorre las Extended Capabilities
+Supported Protocol, asocia cada root port con USB 2/3 y examina `PORTSC`. Los
+anillos command/event conservan índices y cycle state, consumen eventos de
+cambio de puerto intercalados y avanzan `ERDP`. Para el primer dispositivo
+conectado ejecuta reset del puerto, `Enable Slot`, crea Device/Input Contexts y
+el Transfer Ring de EP0, actualiza DCBAA y completa `Address Device`. El harness
+Q35 conecta un teclado `usb-kbd` real y exige `protocols=2`, un puerto conectado
+y `Device addressed: slot=1`; QEMU lo enumeró en el puerto 5 a high speed. El
+siguiente corte implementará transferencias de control y descriptores USB/HID.
 
 ---
 
@@ -330,13 +374,13 @@ companion y compartir un recurso bajo control de capabilities y auditoría.
 
 | Métrica | Valor |
 |---------|-------|
-| **Módulos del kernel** | 38 archivos de módulo (excluye `lib.rs`, `main.rs`, `tests.rs`) |
-| **Líneas de código (Rust)** | ~17,000 |
-| **Unit tests** | 139 (incluye DMA/virtio-blk, PCI/block, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
+| **Módulos del kernel** | 39 archivos de módulo (excluye `lib.rs`, `main.rs`, `tests.rs`) |
+| **Líneas de código (Rust)** | ~18,000 |
+| **Unit tests** | 157 (incluye xHCI, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
 | **Syscalls definidas** | 28 (incluye Kill, SigAction, SigReturn, SigProcMask) |
 | **Harnesses de test Python** | 8 (boot + ACPI S3 + 2 security + 2 integration + 2 e2e) |
-| **CI checks** | 11 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, ACPI S3, security, integration, E2E) |
-| **Make targets de test** | 10 (test, stress-test, iso-test, release-test, boot-test, smp-test, acpi-test, security-test, integration-test, e2e-test) |
+| **CI checks** | 12 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, ACPI S3, security, integration, E2E) |
+| **Make targets de test** | 11 (test, stress-test, iso-test, release-test, boot-test, pcie-test, smp-test, acpi-test, security-test, integration-test, e2e-test) |
 | **Fases completadas** | 11 fases completadas (1–10 y 12); Fase 11 espera gate físico/release |
 
 ---
