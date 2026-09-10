@@ -543,6 +543,7 @@ brane_os/
     AI_SUBSYSTEM.md
     TEST_PLAN.md
     ROADMAP.md
+    USB_XHCI.md
     RUNBOOK.md
     RELEASE.md
     HARDWARE_MATRIX.md
@@ -760,6 +761,7 @@ A partir de este documento se deberán crear y mantener:
 - [x] `RUNBOOK.md`
 - [x] `RELEASE.md`
 - [x] `HARDWARE_MATRIX.md`
+- [x] `USB_XHCI.md` (diseño del octavo corte de la Fase 13)
 
 ---
 

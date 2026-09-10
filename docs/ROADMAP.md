@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §19.  
 > Estado: **Activo** — se actualiza conforme el proyecto avanza.  
-> Última actualización: **2026-09-08**
+> Última actualización: **2026-09-09**
 
 ---
 
@@ -19,7 +19,9 @@
 ```
 
 **Foco actual:** Fase 13 — completar transferencias de control USB, leer los
-descriptores del teclado HID y habilitar su endpoint de interrupción.
+descriptores del teclado HID y habilitar su endpoint de interrupción. La
+secuencia, invariantes y pruebas están definidas en
+[`USB_XHCI.md`](USB_XHCI.md).
 
 ### Disciplina de cambios por fase
 
@@ -346,7 +348,8 @@ conectado ejecuta reset del puerto, `Enable Slot`, crea Device/Input Contexts y
 el Transfer Ring de EP0, actualiza DCBAA y completa `Address Device`. El harness
 Q35 conecta un teclado `usb-kbd` real y exige `protocols=2`, un puerto conectado
 y `Device addressed: slot=1`; QEMU lo enumeró en el puerto 5 a high speed. El
-siguiente corte implementará transferencias de control y descriptores USB/HID.
+siguiente corte implementará transferencias de control y descriptores USB/HID
+según [`USB_XHCI.md`](USB_XHCI.md).
 
 ---
 

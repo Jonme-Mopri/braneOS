@@ -773,6 +773,8 @@ Context, Input Context y el Transfer Ring de EP0 según `HCCPARAMS1.CSZ`. Tras
 publicar el Device Context en DCBAA, `Address Device` completa la primera
 enumeración real de un teclado `usb-kbd` en Q35. Siguen pendientes las
 transferencias de control, los descriptores USB/HID y el endpoint interrupt IN.
+El diseño ejecutable del siguiente corte está en
+[`USB_XHCI.md`](USB_XHCI.md).
 
 ### 7.7 FAT32 read-only
 

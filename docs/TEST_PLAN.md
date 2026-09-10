@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §18.  
 > Estado: **Activo**.  
-> Última actualización: **2026-09-08**
+> Última actualización: **2026-09-09**
 
 ---
 
@@ -213,7 +213,9 @@ La validación local equivalente recomendada está documentada en
 14. ~~Fase 13: sondear tamaños de BAR, mapear apertures MMIO y comenzar xHCI.~~ ✅ **Completado** (150 tests + Q35/ECAM + BAR0 MMIO + capability header xHCI)
 15. ~~Fase 13: reset controlado de xHCI y estructuras DMA para command/event rings.~~ ✅ **Completado** (153 tests + Q35 reset/running + No Op Command Completion sobre DMA)
 16. ~~Fase 13: Supported Protocol/PORTSC y ciclo Enable Slot/Address Device.~~ ✅ **Completado** (157 tests + teclado Q35 conectado, reset de puerto, slot/contextos y Address Device)
-17. Fase 13: transferencias de control, descriptores USB/HID y endpoint interrupt IN.
+17. Fase 13: transferencias de control, descriptores USB/HID y endpoint
+    interrupt IN; diseño y criterio de salida en
+    [`USB_XHCI.md`](USB_XHCI.md).
 
 ## 7. Make targets disponibles
 

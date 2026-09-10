@@ -37,6 +37,7 @@ se mantienen en [`ROADMAP.md`](ROADMAP.md).
 | Registrar resultados en hardware | [`HARDWARE_MATRIX.md`](HARDWARE_MATRIX.md) |
 | Revisar límites de seguridad | [`SECURITY_MODEL.md`](SECURITY_MODEL.md) |
 | Revisar el subsistema IA | [`AI_SUBSYSTEM.md`](AI_SUBSYSTEM.md) |
+| Implementar el siguiente corte USB HID | [`USB_XHCI.md`](USB_XHCI.md) |
 | Entender decisiones arquitectónicas | [`ADR/README.md`](ADR/README.md) |
 | Consultar cambios por versión | [`../CHANGELOG.md`](../CHANGELOG.md) |
 

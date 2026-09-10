@@ -64,6 +64,7 @@ A native AI subsystem that operates under strict capability-based security:
 Start with the [documentation index](docs/README.md). Key references are the
 [roadmap](docs/ROADMAP.md), [architecture](docs/ARCHITECTURE.md),
 [runbook](docs/RUNBOOK.md), [test plan](docs/TEST_PLAN.md), and
+[USB/xHCI implementation plan](docs/USB_XHCI.md),
 [architecture decisions](docs/ADR/README.md), and [changelog](CHANGELOG.md).
 
 ---
