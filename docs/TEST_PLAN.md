@@ -216,6 +216,9 @@ La validación local equivalente recomendada está documentada en
 17. Fase 13: transferencias de control, descriptores USB/HID y endpoint
     interrupt IN; diseño y criterio de salida en
     [`USB_XHCI.md`](USB_XHCI.md).
+18. Fase 13: USB Mass Storage Bulk-Only, perfil SCSI read-only, registro como
+    `BlockDevice` y montaje FAT32; depende del corte HID y se especifica en
+    [`USB_STORAGE.md`](USB_STORAGE.md).
 
 ## 7. Make targets disponibles
 

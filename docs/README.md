@@ -38,6 +38,7 @@ se mantienen en [`ROADMAP.md`](ROADMAP.md).
 | Revisar límites de seguridad | [`SECURITY_MODEL.md`](SECURITY_MODEL.md) |
 | Revisar el subsistema IA | [`AI_SUBSYSTEM.md`](AI_SUBSYSTEM.md) |
 | Implementar el siguiente corte USB HID | [`USB_XHCI.md`](USB_XHCI.md) |
+| Preparar USB Mass Storage sobre xHCI | [`USB_STORAGE.md`](USB_STORAGE.md) |
 | Entender decisiones arquitectónicas | [`ADR/README.md`](ADR/README.md) |
 | Consultar cambios por versión | [`../CHANGELOG.md`](../CHANGELOG.md) |
 

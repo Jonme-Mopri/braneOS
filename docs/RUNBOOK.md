@@ -257,6 +257,9 @@ Antes de publicar v1.0 quedan dos gates deliberadamente manuales:
 QEMU cubre BIOS/UEFI de forma automatizada, pero no sustituye la validación
 física. USB HID tampoco se considera completo: Q35 llega hasta `Address Device`
 y todavía faltan control transfers, descriptores HID y reportes interrupt IN.
+USB Mass Storage continúa como diseño posterior, documentado en
+[`USB_STORAGE.md`](USB_STORAGE.md); todavía no existe un target ejecutable para
+esa ruta.
 
 ---
 

@@ -351,6 +351,12 @@ y `Device addressed: slot=1`; QEMU lo enumeró en el puerto 5 a high speed. El
 siguiente corte implementará transferencias de control y descriptores USB/HID
 según [`USB_XHCI.md`](USB_XHCI.md).
 
+**Octavo corte planificado:** completar el teclado HID desde EP0 hasta reportes
+interrupt IN. Después de satisfacer su criterio de salida, el **noveno corte**
+reutilizará el motor de transferencias para USB Mass Storage Bulk-Only, SCSI
+read-only, registro en la block layer y montaje FAT32. El diseño y sus límites
+están en [`USB_STORAGE.md`](USB_STORAGE.md).
+
 ---
 
 ## 🔲 Fase 14 — Plataforma y Ecosistema Brane

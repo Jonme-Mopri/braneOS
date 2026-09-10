@@ -13,6 +13,8 @@ All notable changes to Brane OS are documented here. The project follows
   descriptor validation, HID boot keyboard reports and QEMU acceptance tests.
 - Proposed xHCI event and transfer model with a single Event Ring dispatcher,
   bounded polling, explicit DMA ownership and completion correlation.
+- Phase 13 follow-up specification for read-only USB Mass Storage using
+  Bulk-Only Transport, a minimal SCSI profile and the existing block/FAT32 path.
 - Portable UEFI ISO packaging with BIOS and UEFI disk artifacts.
 - Automated ISO boot verification with QEMU, OVMF and TCG.
 - Tag-driven GitHub release workflow with SHA-256 verification.

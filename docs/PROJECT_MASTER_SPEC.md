@@ -544,6 +544,7 @@ brane_os/
     TEST_PLAN.md
     ROADMAP.md
     USB_XHCI.md
+    USB_STORAGE.md
     RUNBOOK.md
     RELEASE.md
     HARDWARE_MATRIX.md
@@ -762,6 +763,7 @@ A partir de este documento se deberán crear y mantener:
 - [x] `RELEASE.md`
 - [x] `HARDWARE_MATRIX.md`
 - [x] `USB_XHCI.md` (diseño del octavo corte de la Fase 13)
+- [x] `USB_STORAGE.md` (diseño del noveno corte de la Fase 13)
 
 ---
 

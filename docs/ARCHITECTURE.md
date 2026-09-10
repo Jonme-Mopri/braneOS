@@ -682,7 +682,7 @@ pub trait Driver: Send + Sync {
 | Keyboard (PS/2) | ✅ Implementado | 1/33 | Entrada TTY básica |
 | Block layer | ✅ Implementado | — | Registry, validación y dispatch sectorial |
 | Disk (virtio-blk) | ✅ Legacy | PCI | Virtqueue por polling y DMA bajo 4 GiB |
-| Disk (USB) | 🔲 Pendiente | — | Requiere xHCI y USB mass storage |
+| Disk (USB) | 🔲 Pendiente | Polling | BOT/SCSI read-only diseñado en `USB_STORAGE.md` |
 | Network (virtio-net) | ✅ Base integrada | PCI | Discovery compartido + transporte legacy I/O |
 | USB/xHCI | 🔄 Enumeración base | Polling | Reset de host/puerto, Command/Event Rings, slot, contextos y Address Device sobre PCIe MMIO |
 | Bluetooth | 🔲 Futuro | — | Para mobile companion |
@@ -778,7 +778,19 @@ transferencias de control, los descriptores USB/HID y el endpoint interrupt IN.
 El diseño ejecutable del siguiente corte está en
 [`USB_XHCI.md`](USB_XHCI.md).
 
-### 7.7 FAT32 read-only
+### 7.7 USB Mass Storage objetivo
+
+El corte posterior a HID reutilizará control transfers, el despachador común y
+los Transfer Rings para configurar una interface Mass Storage `08h/06h/50h`.
+La baseline elegida es Bulk-Only Transport con un solo comando activo, LUN 0 y
+los comandos SCSI mínimos para descubrir geometría y ejecutar `READ(10)`.
+
+El backend se registrará como `usb-storage0` read-only en `BlockRegistry`; FAT32
+lo consumirá sin conocer CBW, CSW, endpoints o DMA. UAS, escritura, múltiples
+LUN y hotplug quedan fuera del primer incremento. La secuencia, recovery,
+ownership y pruebas están definidos en [`USB_STORAGE.md`](USB_STORAGE.md).
+
+### 7.8 FAT32 read-only
 
 `fat32.rs` consume un `BlockDeviceHandle` de 512 bytes por bloque y descubre
 volúmenes FAT32 tanto en LBA0 como dentro de una partición MBR de tipo FAT32.
