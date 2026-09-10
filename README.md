@@ -18,7 +18,12 @@ The logo represents interconnected membranes forming a single adaptive system. B
 
 | Status | Version | Architecture | Primary Language |
 |--------|---------|--------------|------------------|
-| v1.0 Release Engineering | `v0.1.0` | `x86_64` | Rust |
+| Phase 13 · Hardware I/O | `v0.1.0` | `x86_64` | Rust |
+
+Current milestone: virtio-blk and read-only FAT32 are operational; xHCI resets
+and addresses a USB keyboard in Q35. USB control transfers and HID interrupt
+reports are the next implementation cut. Physical hardware validation and the
+v1.0 tag are still release gates.
 
 ---
 
@@ -56,15 +61,10 @@ A native AI subsystem that operates under strict capability-based security:
 
 ---
 
-For detailed technical documentation, see the [`docs/`](docs/) directory:
-- [PROJECT_MASTER_SPEC.md](docs/PROJECT_MASTER_SPEC.md)
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- [SECURITY_MODEL.md](docs/SECURITY_MODEL.md)
-- [AI_SUBSYSTEM.md](docs/AI_SUBSYSTEM.md)
-- [ROADMAP.md](docs/ROADMAP.md)
-- [RELEASE.md](docs/RELEASE.md)
-- [RUNBOOK.md](docs/RUNBOOK.md)
-- [CHANGELOG.md](CHANGELOG.md)
+Start with the [documentation index](docs/README.md). Key references are the
+[roadmap](docs/ROADMAP.md), [architecture](docs/ARCHITECTURE.md),
+[runbook](docs/RUNBOOK.md), [test plan](docs/TEST_PLAN.md), and
+[architecture decisions](docs/ADR/README.md), and [changelog](CHANGELOG.md).
 
 ---
 
@@ -72,7 +72,7 @@ For detailed technical documentation, see the [`docs/`](docs/) directory:
 
 To build and run Brane OS locally, you'll need the following tools:
 
-- **Rust Nightly** (managed by `rust-toolchain.toml`)
+- **Rust Nightly** (the exact version is pinned by `rust-toolchain.toml`)
 - Rust components: `rust-src`, `llvm-tools-preview`
 - **QEMU** (`qemu-system-x86_64`) for emulation
 - `make`
@@ -81,8 +81,8 @@ To build and run Brane OS locally, you'll need the following tools:
 ```bash
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup toolchain install nightly
-rustup component add rust-src llvm-tools-preview rustfmt clippy --toolchain nightly
+rustup toolchain install nightly-2026-03-11
+rustup component add rust-src llvm-tools-preview rustfmt clippy --toolchain nightly-2026-03-11
 
 # Install QEMU
 brew install qemu

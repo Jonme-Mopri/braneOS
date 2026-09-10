@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §18.  
 > Estado: **Activo**.  
-> Última actualización: **2026-09-06**
+> Última actualización: **2026-09-08**
 
 ---
 
@@ -44,12 +44,17 @@ Brane OS utiliza una estrategia de testing multinivel que cubre desde unidades a
 
 **Objetivo:** Validar interacción entre subsistemas.
 
-**Cobertura:**
-- Syscall → servicio del sistema.
-- Proceso → capability broker → resultado.
-- AI agent → policy engine → aprobación/denegación.
-- Capability broker → audit service → registro.
-- Inicialización secuencial de servicios.
+**Cobertura actual:**
+
+- Dispatcher de syscalls y códigos de retorno mediante tests host.
+- IPC request/response entre colas de tareas mediante tests host.
+- Inicialización secuencial de proceso, capabilities y audit log en QEMU.
+- Correlación de los grants del boot con eventos de auditoría.
+
+**Cobertura objetivo pendiente:** syscall real desde ring 3 → servicio, proceso
+→ capability broker, agente IA → policy engine y broker → audit service. Los
+harnesses actuales no demuestran esos servicios porque aún no existen como
+procesos aislados.
 
 **Herramientas:** Tests de integración en Rust, Python harnesses.
 
@@ -91,12 +96,16 @@ Brane OS utiliza una estrategia de testing multinivel que cubre desde unidades a
 
 **Objetivo:** Validar modelo de seguridad.
 
-**Cobertura:**
-- Denegación de operaciones sin capacidad.
-- Intentos de escalamiento de privilegios.
-- Solicitudes IA fuera de scope (deben fallar).
-- Consistencia del audit log tras operaciones.
-- Integridad de tokens de capacidad.
+**Cobertura actual:**
+
+- Grant, check y revoke; denegación sin capability o tras revocación.
+- Rechazo de números de syscall inválidos mediante tests host.
+- Registro de grants/revocaciones en el audit ring.
+- Boot QEMU sin panic, double fault ni indicadores explícitos de escalamiento.
+
+**Cobertura objetivo pendiente:** invocaciones privilegiadas negativas desde
+ring 3, mediación uniforme del dispatcher, solicitudes IA fuera de scope,
+integridad criptográfica de tokens y persistencia del audit log.
 
 ---
 
@@ -104,13 +113,16 @@ Brane OS utiliza una estrategia de testing multinivel que cubre desde unidades a
 
 **Objetivo:** Validar escenarios completos.
 
-**Escenario tipo:**
-1. Se simula una anomalía.
-2. La IA detecta la anomalía.
-3. El decision planner genera una propuesta.
-4. La política evalúa la propuesta.
-5. La acción se ejecuta o se rechaza.
-6. El evento queda auditado.
+**Cobertura actual:**
+
+- Secuencia completa de arranque y orden de subsistemas.
+- Disponibilidad de `brsh` y comandos de inspección.
+- Ausencia de panic, double fault y stack overflow durante el flujo.
+
+**Escenario objetivo pendiente:** anomalía → observación IA → propuesta →
+policy engine → ejecución o denegación → auditoría correlacionada. Este flujo no
+se considera cubierto hasta que el orquestador y el policy engine existan fuera
+del kernel.
 
 ---
 
@@ -192,7 +204,8 @@ La validación local equivalente recomendada está documentada en
 6. ~~Agregar jobs de CI para los harnesses Python (security, integration, e2e).~~ ✅ **Completado** (matriz `runtime-tests` en `.github/workflows/ci.yml`)
 7. ~~Agregar suspensión/reanudación ACPI S3 automatizada.~~ ✅ **Completado** (`tests/acpi/test_suspend_resume.py` + QMP `SUSPEND`/`WAKEUP` + verificación de shell post-resume)
 8. ~~Stress tests y fuzzing de componentes críticos.~~ ✅ **Completado** (`fuzz_tests` + `stress_tests`, semillas deterministas y check dedicado de CI)
-9. Release v1.0: ISO booteable + documentación API publicada.
+9. Release v1.0: artefactos y API docs automatizados; pendiente validación
+   física, cierre de changelog y publicación del tag.
 10. ~~Fase 13: base de block layer y enumeración PCI con pruebas host y boot.~~ ✅ **Completado** (`pci.rs`, `block.rs`, 134 tests y verificación QEMU)
 11. ~~Fase 13: transporte `virtio-blk`, DMA y primer dispositivo real.~~ ✅ **Completado** (139 tests + boot QEMU 1/4 vCPU + lectura LBA0)
 12. ~~Fase 13: conectar FAT32 a la block layer y leer directorios/archivos reales.~~ ✅ **Completado** (143 tests + montaje `/disk` + lectura VFS sobre virtio-blk en QEMU)

@@ -1,12 +1,23 @@
-# PROJECT_MASTER_SPEC.md
+# Brane OS — Especificación maestra
+
+> Versión de arquitectura: **v0.1**. Versión de software: **0.1.0**.
+> Estado: **baseline implementada; plataforma en evolución**.
+> Última actualización: **2026-09-09**.
+
+Este documento fija la visión y los requisitos de largo plazo. El estado
+ejecutable se detalla en [`ROADMAP.md`](ROADMAP.md), y la separación entre
+arquitectura objetivo e implementación actual en
+[`ARCHITECTURE.md`](ARCHITECTURE.md), [`SECURITY_MODEL.md`](SECURITY_MODEL.md) y
+[`AI_SUBSYSTEM.md`](AI_SUBSYSTEM.md).
 
 ## 1. Identidad del proyecto
 
 **Nombre del sistema operativo:**  
 `Brane OS`
 
-**Versión de arquitectura:**  
-`v0.1`
+**Versión de arquitectura:** `v0.1`
+
+**Versión del workspace:** `0.1.0`
 
 **Autor / equipo:**  
 `Brane OS Team`
@@ -19,7 +30,11 @@
 - [x] User space inicial
 - [x] Seguridad base
 - [x] IA observadora
-- [x] IA actuadora restringida
+- [x] Prototipo de IA actuadora restringida (no habilitado para producción)
+- [x] SMP/APIC en entorno emulado
+- [x] Almacenamiento virtio-blk + FAT32 read-only
+- [ ] USB HID y USB mass storage completos
+- [ ] Gate físico y publicación v1.0
 
 ---
 
@@ -117,7 +132,7 @@ Diseñar y construir un sistema operativo desde cero que permita:
 
 ---
 
-## 7. Stack tecnológico propuesto
+## 7. Stack tecnológico adoptado
 
 ### 7.1 Lenguajes
 
@@ -159,7 +174,12 @@ Uso para:
 
 ## 8. Tipo de arquitectura
 
-**Modelo propuesto:** kernel híbrido modular.
+**Modelo adoptado:** kernel híbrido modular.
+
+La implementación 0.1 mantiene todavía varios prototipos —en particular
+seguridad e IA— dentro del kernel. Es una baseline funcional, no la culminación
+del aislamiento por capas descrito aquí. La migración a servicios ring 3 debe
+preservar los contratos de capacidades, IPC y auditoría.
 
 ### Justificación
 Se elige una arquitectura híbrida modular porque permite:
@@ -480,20 +500,34 @@ Validan: arranque, logs seriales, estabilidad básica, carga de init.
 Validan: denegación de operaciones indebidas, intentos de escalamiento, solicitudes IA fuera de scope, consistencia del audit log.
 
 ### 18.5 End-to-end tests
-Escenarios completos: se detecta anomalía → la IA genera propuesta → la política evalúa → la acción se ejecuta o se rechaza → el evento queda auditado.
+El escenario objetivo es: se detecta anomalía → la IA genera propuesta → la
+política evalúa → la acción se ejecuta o se rechaza → el evento queda auditado.
+La cobertura v0.1 valida el boot y la shell; el flujo IA/policy permanece
+pendiente, como detalla `TEST_PLAN.md`.
 
 ---
 
 ## 19. Roadmap de alto nivel
 
-| Fase | Nombre | Componentes Clave |
-|------|--------|-------------------|
-| 1 | Boot y kernel mínimo | Bootloader, carga de kernel, serial logging, interrupciones iniciales |
-| 2 | Memoria y scheduler | Heap, paging, tareas/hilos, planificación inicial |
-| 3 | Syscalls e IPC | Interfaz kernel/user, comunicación base |
-| 4 | Servicios del sistema | init, process_manager, filesystem_service, policy_engine, audit_service |
-| 5 | IA observadora | context_collector, model_runtime, reportes y sugerencias |
-| 6 | IA actuadora restringida | capability_broker, ejecución limitada, acciones reversibles, trazabilidad total |
+| Fase | Nombre | Estado | Resultado principal |
+|------|--------|--------|---------------------|
+| 1 | Boot y kernel mínimo | ✅ | Arranque QEMU, serial, GDT/IDT, PIC y teclado PS/2 |
+| 2 | Memoria y scheduler | ✅ | Frames, paging/heap y scheduler cooperativo |
+| 3 | Syscalls e IPC | ✅ | ABI inicial y message passing acotado |
+| 4 | Seguridad, auditoría e IA | ✅ baseline | Capacidades, audit ring y motor IA restringido en kernel |
+| 5 | Brane Protocol | ✅ | Discovery, sesiones y mensajes base |
+| 6 | Bootloader real y paging | ✅ | BIOS/UEFI, mapa real, framebuffer y heap mapeado |
+| 7 | Filesystem, shell y TTY | ✅ | VFS, RamFS, `brsh` y FAT32 base |
+| 8 | Networking y clustering | ✅ base | virtio-net, IPv4, TCP/UDP, sockets y DNS estático |
+| 9 | Brane Protocol v2 | ✅ | X25519, ChaCha20-Poly1305 y negociación de capacidades |
+| 10 | Producción y estabilidad | ✅ | User mode, señales, ACPI S3 y suites QEMU |
+| 11 | Release Engineering v1.0 | 🔄 | Artefactos automatizados; faltan hardware físico y tag |
+| 12 | SMP, APIC y concurrencia | ✅ | 4 vCPU con INIT/SIPI, estado per-CPU y stress |
+| 13 | Hardware I/O y almacenamiento | 🔄 | PCIe, block, virtio-blk, FAT32 y enumeración xHCI parcial |
+| 14 | Plataforma y ecosistema | 🔲 | Paquetes, companion, resource sharing y SDK |
+
+Los cortes, dependencias y criterios de salida canónicos están en
+[`ROADMAP.md`](ROADMAP.md); esta tabla sólo conserva la vista estratégica.
 
 ---
 
@@ -502,12 +536,17 @@ Escenarios completos: se detecta anomalía → la IA genera propuesta → la pol
 ```text
 brane_os/
   docs/
+    README.md
     PROJECT_MASTER_SPEC.md
     ARCHITECTURE.md
     SECURITY_MODEL.md
     AI_SUBSYSTEM.md
     TEST_PLAN.md
     ROADMAP.md
+    RUNBOOK.md
+    RELEASE.md
+    HARDWARE_MATRIX.md
+    PARALLELS.md
     ADR/
 
   boot/
@@ -691,13 +730,18 @@ Formato de respuesta:
 El MVP se considera exitoso si:
 
 - [x] Arranca de forma repetible en QEMU.
-- [ ] El kernel inicializa subsistemas básicos.
-- [ ] Existe una shell mínima funcional.
-- [ ] Hay syscalls mínimas y proceso init.
-- [ ] Existe auditoría básica.
-- [ ] Existe policy engine.
-- [ ] La IA puede observar y sugerir sin romper aislamiento.
-- [ ] El sistema puede ejecutar pruebas de arranque e integración básicas.
+- [x] El kernel inicializa subsistemas básicos.
+- [x] Existe una shell mínima funcional.
+- [x] Hay syscalls mínimas y proceso `init` modelado en la tabla de procesos.
+- [x] Existe auditoría básica mediante un ring buffer acotado.
+- [ ] Existe un `policy_engine` aislado en user space; hoy sólo hay decisiones
+  estáticas y validación de capacidades en kernel.
+- [x] La IA puede observar y sugerir en modo `ObserveOnly` sin ejecutar acciones.
+- [x] El sistema ejecuta pruebas unitarias, de arranque, integración, seguridad
+  y end-to-end en QEMU.
+
+La baseline MVP es operativa en emulación. El punto pendiente de esta lista es
+una deuda de la arquitectura objetivo, no un bloqueo para arrancar el prototipo.
 
 ---
 
@@ -711,23 +755,33 @@ A partir de este documento se deberán crear y mantener:
 - [x] `TEST_PLAN.md`
 - [x] `ROADMAP.md`
 - [x] `ADR/ADR-001-*.md`
+- [x] `ADR/ADR-002-*.md` a `ADR/ADR-005-*.md`
+- [x] `README.md` (índice documental)
+- [x] `RUNBOOK.md`
+- [x] `RELEASE.md`
+- [x] `HARDWARE_MATRIX.md`
 
 ---
 
-## 29. Decisiones abiertas
+## 29. Registro de decisiones abiertas
 
-Pendientes por definir en siguientes documentos:
+| Decisión | Estado actual | Evidencia / seguimiento |
+|----------|---------------|-------------------------|
+| Boot path | ✅ Baseline | Crate `bootloader` 0.11, imágenes BIOS/UEFI e ISO; ver `RUNBOOK.md` |
+| Memoria virtual | ✅ Baseline | `OffsetPageTable`, direct map, heap y ventanas MMIO; formalizada en ADR-005 |
+| ABI de syscalls | 🟡 Parcial | ADR-003 registra 28 números y `syscall/sysret`; handlers y versionado siguen incompletos |
+| IPC | ✅ Baseline | ADR-004 registra colas ring por tarea y mensajes de hasta 4 KiB |
+| Brane Protocol v2 | 🟡 Parcial | ADR-002 registra framing, sesión y cifrado; identidad/policy siguen pendientes |
+| Audit log | ✅ Volátil | Ring buffer de 512 eventos; formato persistente aún abierto |
+| Policy store | 🔲 Abierto | No existe persistencia ni servicio `policy_engine` aislado |
+| Runtime IA | 🟡 Prototipo | `ai.rs` ejecuta observación/sugerencias en kernel; migración a user space pendiente |
+| Persistencia | 🟡 Parcial | Lectura FAT32 real; escrituras, journal y política de montaje pendientes |
+| Filesystem inicial | ✅ Baseline | VFS + RamFS + FAT32 read-only; evolución documentada en arquitectura |
+| Networking inicial | ✅ Baseline | virtio-net, Ethernet/ARP/IPv4, TCP/UDP, sockets y DNS estático |
 
-- [ ] Formato exacto del boot path.
-- [ ] Estrategia precisa de memoria virtual.
-- [ ] Diseño definitivo de syscalls.
-- [ ] Modelo exacto de IPC.
-- [ ] Formato del audit log.
-- [ ] Ubicación final del policy store.
-- [ ] Forma del runtime IA.
-- [ ] Estrategia de persistencia inicial.
-- [ ] Diseño del filesystem inicial.
-- [ ] Soporte de red en fases tempranas.
+Las decisiones con impacto duradero deben cerrarse en ADRs. Las brechas de
+seguridad e IA se detallan en sus documentos específicos y no deben presentarse
+como garantías ya implementadas.
 
 ---
 

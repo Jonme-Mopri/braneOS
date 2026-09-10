@@ -7,6 +7,8 @@ All notable changes to Brane OS are documented here. The project follows
 
 ### Added
 
+- Documentation portal, reconciled current-vs-target status, and ADRs for Brane
+  Protocol v2, the syscall ABI, IPC message passing and virtual memory.
 - Portable UEFI ISO packaging with BIOS and UEFI disk artifacts.
 - Automated ISO boot verification with QEMU, OVMF and TCG.
 - Tag-driven GitHub release workflow with SHA-256 verification.

@@ -1,6 +1,6 @@
 # RUNBOOK.md - Build, CI y ejecucion local
 
-> Estado: operativo para desarrollo local. Última actualización: 2026-09-06.
+> Estado: operativo para desarrollo local. Última actualización: 2026-09-08.
 > Este documento describe el flujo
 > actual del repositorio, no el release final instalable.
 
@@ -75,8 +75,8 @@ forma parte de este corte.
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup toolchain install nightly
-rustup component add rust-src llvm-tools-preview rustfmt clippy --toolchain nightly
+rustup toolchain install nightly-2026-03-11
+rustup component add rust-src llvm-tools-preview rustfmt clippy --toolchain nightly-2026-03-11
 brew install qemu
 ```
 
@@ -239,15 +239,24 @@ Jobs actuales:
 
 ---
 
-## 7. Pendiente para ejecucion tipo release
+## 7. Gate de release v1.0
 
-Para pasar de ejecución de desarrollo en QEMU a release instalable todavía
-faltan:
+La automatización de release ya construye ISO UEFI El Torito, imágenes BIOS y
+UEFI, checksum SHA-256 y archivo comprimido. `make release-test VERSION=dev`
+valida el conjunto y arranca la ISO con OVMF. Los tags `v*` ejecutan el workflow
+de release y publican los artefactos con notas generadas.
 
-- publicar un artefacto versionado de la imagen booteable mediante tags,
-- completar la matriz BIOS frente a UEFI (la ISO actual usa UEFI El Torito),
-- ampliar la validación ACPI S3 a hardware físico adicional,
-- cerrar el proceso v1.0 con checksums y notas de versión.
+Antes de publicar v1.0 quedan dos gates deliberadamente manuales:
+
+1. completar al menos una fila de hardware real en
+   [`HARDWARE_MATRIX.md`](HARDWARE_MATRIX.md), incluida la evidencia de boot,
+   teclado, red y ACPI;
+2. ejecutar el checklist de [`RELEASE.md`](RELEASE.md), cerrar el changelog y
+   crear el tag versionado.
+
+QEMU cubre BIOS/UEFI de forma automatizada, pero no sustituye la validación
+física. USB HID tampoco se considera completo: Q35 llega hasta `Address Device`
+y todavía faltan control transfers, descriptores HID y reportes interrupt IN.
 
 ---
 

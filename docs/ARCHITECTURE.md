@@ -1,7 +1,11 @@
 # ARCHITECTURE.md — Brane OS
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §8–§10.  
-> Estado: **Elaborado** — v0.1
+> Estado: **vigente** — baseline v0.1. Última actualización: **2026-09-09**.
+
+La arquitectura describe tanto el estado implementado como el objetivo por
+capas. Los componentes marcados como futuros no deben interpretarse como
+garantías del kernel actual; el estado ejecutivo se mantiene en `ROADMAP.md`.
 
 ---
 
@@ -193,6 +197,10 @@ pub enum MemoryRegionKind {
 4. **Interfaces estables** — los módulos se comunican a través de traits bien definidos.
 5. **Adaptabilidad** — el module_loader permite cargar/descargar sub-branas en caliente.
 
+Estos son principios de destino. La baseline v0.1 conserva prototipos de IA,
+auditoría y capacidades en ring 0 mientras se estabilizan IPC y user mode; sus
+límites están documentados en `SECURITY_MODEL.md` y `AI_SUBSYSTEM.md`.
+
 ### 5.2 Módulos del Kernel
 
 #### 5.2.1 Memory Manager
@@ -219,7 +227,7 @@ Gestiona toda la memoria física y virtual del sistema.
 └──────────────────────────────────────┘
 ```
 
-**API del kernel:**
+**Contrato conceptual:**
 ```rust
 pub trait FrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame>;
@@ -239,7 +247,7 @@ pub trait PageMapper {
 }
 ```
 
-**Mapa de memoria virtual:**
+**Layout virtual objetivo:**
 
 | Rango Virtual | Uso |
 |--------------|-----|
@@ -248,6 +256,11 @@ pub trait PageMapper {
 | `0xFFFF_8000_4000_0000` — `0xFFFF_BFFF_FFFF_FFFF` | Mapeo directo de memoria física |
 | `0xFFFF_C000_0000_0000` — `0xFFFF_FFFF_7FFF_FFFF` | Kernel code + data |
 | `0xFFFF_FFFF_8000_0000` — `0xFFFF_FFFF_FFFF_FFFF` | Kernel stacks |
+
+La baseline no reserva todavía todo este layout. Usa el direct map entregado
+por el bootloader, heap de 1 MiB en `0x4444_4444_0000` y ventanas separadas para
+ECAM y BAR MMIO. La decisión y los límites ejecutables están en
+[`ADR-005`](ADR/ADR-005-virtual-memory.md).
 
 ---
 
@@ -376,8 +389,8 @@ pub enum Priority {
 Punto de entrada para todas las llamadas del user space al kernel.
 
 ```rust
-/// Tabla de syscalls.
-pub enum Syscall {
+/// Tabla de syscalls reservadas.
+pub enum SyscallNumber {
     // --- Proceso ---
     Exit          = 0,
     Yield         = 1,
@@ -415,6 +428,12 @@ pub enum Syscall {
     BraneConnect  = 61,
     BraneSend     = 62,
     BraneRecv     = 63,
+
+    // --- Señales ---
+    Kill          = 70,
+    SigAction     = 71,
+    SigReturn     = 72,
+    SigProcMask   = 73,
 }
 ```
 
@@ -430,13 +449,18 @@ pub enum Syscall {
 | `r8`  | Argumento 5 |
 | `rax` (retorno) | Resultado / código de error |
 
+La entrada real usa `syscall/sysret` con estado kernel GS por CPU; `iretq` se
+reserva para el primer salto a ring 3. De los 28 números reservados sólo un
+subconjunto tiene dispatch y varias operaciones conservan semántica stub. No hay
+fallback `int 0x80` conectado. Ver [`ADR-003`](ADR/ADR-003-syscall-abi.md).
+
 ---
 
 #### 5.2.5 IPC Core
 
 Comunicación entre procesos basada en message passing.
 
-```rust
+```text
 /// Mensaje IPC con header tipado y payload.
 #[repr(C)]
 pub struct IpcMessage {
@@ -444,7 +468,7 @@ pub struct IpcMessage {
     pub receiver: TaskId,
     pub msg_type: MessageType,
     pub payload_len: usize,
-    pub payload: [u8; IPC_MAX_PAYLOAD], // 4096 bytes max
+    pub payload: [u8; MAX_PAYLOAD], // 4096 bytes max
 }
 
 pub enum MessageType {
@@ -454,11 +478,8 @@ pub enum MessageType {
     BraneRelay,  // Mensaje reenviado desde brana externa
 }
 
-pub trait IpcChannel {
-    fn send(&self, msg: &IpcMessage) -> Result<(), IpcError>;
-    fn recv(&self, timeout: Option<Duration>) -> Result<IpcMessage, IpcError>;
-    fn send_recv(&self, msg: &IpcMessage) -> Result<IpcMessage, IpcError>;
-}
+IpcManager::send(&mut self, msg: IpcMessage) -> SyscallResult
+IpcManager::recv(&mut self, task_id: TaskId) -> Result<IpcMessage, SyscallError>
 ```
 
 **Modelo:**
@@ -468,6 +489,10 @@ Proceso A ──send()──▶ ┌───────────┐ ──de
 Proceso A ◀──recv()── │ (kernel)  │ ◀──send()──── Proceso B
                       └───────────┘
 ```
+
+La baseline mantiene 64 colas × 16 mensajes, es no bloqueante y usa un mutex
+global. El sender autenticado, capabilities y la conexión efectiva con syscalls
+siguen pendientes. Ver [`ADR-004`](ADR/ADR-004-ipc-message-passing.md).
 
 ---
 
@@ -485,14 +510,13 @@ pub struct Capability {
     pub permissions: CapPermissions,
     pub risk_level: RiskLevel,
     pub revocable: bool,
-    pub expires: Option<Timestamp>,
 }
 
 pub enum CapScope {
     Process(TaskId),
-    Service(ServiceId),
+    Service(u64),
     System,
-    Brane(BraneId),  // Capacidad sobre brana remota
+    Brane(u64),  // Capacidad sobre brana remota
 }
 
 pub enum RiskLevel {
@@ -502,13 +526,15 @@ pub enum RiskLevel {
     Critical,
 }
 
-pub trait CapabilityValidator {
-    fn check(&self, task: TaskId, cap: CapabilityId) -> Result<(), CapError>;
-    fn grant(&mut self, task: TaskId, cap: Capability) -> Result<CapabilityId, CapError>;
-    fn revoke(&mut self, cap: CapabilityId) -> Result<(), CapError>;
-    fn list(&self, task: TaskId) -> Vec<CapabilityId>;
-}
 ```
+
+```text
+CapabilityManager::check(task, required, scope) -> Result<CapabilityId, CapError>
+CapabilityManager::revoke(cap_id) -> Result<(), CapError>
+```
+
+Expiración, autenticidad criptográfica, delegación y persistencia son parte del
+contrato futuro, no campos implementados en v0.1.
 
 ---
 
@@ -518,41 +544,38 @@ Puntos de inserción transversal para registrar eventos auditables.
 
 ```rust
 pub struct AuditEvent {
-    pub timestamp: Timestamp,
+    pub seq: u64,
+    pub tick: u64,
     pub source: TaskId,
     pub action: AuditAction,
-    pub target: Option<ResourceId>,
     pub capability_used: Option<CapabilityId>,
     pub result: AuditResult,
-    pub context: [u8; 256],  // Metadata adicional serializada
 }
 
 pub enum AuditAction {
-    SyscallInvoked(Syscall),
+    SyscallInvoked(u64),
     CapabilityChecked(CapabilityId),
     CapabilityGranted(CapabilityId),
     CapabilityRevoked(CapabilityId),
     IpcMessageSent { to: TaskId },
-    BraneConnected(BraneId),
-    BraneDisconnected(BraneId),
-    AiActionRequested(ActionId),
-    AiActionAuthorized(ActionId),
-    AiActionDenied(ActionId),
-    PolicyEvaluated(PolicyId),
+    BraneConnected(u64),
+    BraneDisconnected(u64),
+    AiActionRequested(u64),
+    AiActionAuthorized(u64),
+    AiActionDenied(u64),
+    PolicyEvaluated(u64),
 }
 
 pub enum AuditResult {
     Success,
     Denied,
-    Error(ErrorCode),
+    Error(i64),
     Escalated,
 }
-
-pub trait AuditHook {
-    fn record(&mut self, event: AuditEvent);
-    fn flush(&mut self);
-}
 ```
+
+El audit log actual es un ring volátil de 512 eventos. No contiene metadata
+arbitraria ni persistencia; esas funciones pertenecen al futuro audit service.
 
 ---
 
@@ -594,6 +617,10 @@ pub enum ModuleStatus {
 ## 6. Capa 2 — Servicios del sistema
 
 Los servicios corren en user space y se comunican con el kernel a través de syscalls e IPC. Cada servicio es una sub-brana independiente.
+
+Esta sección describe la arquitectura objetivo. En v0.1, `init` y varios
+servicios se representan en la tabla de procesos, pero no ejecutan todavía sus
+implementaciones completas como binarios ring 3 aislados.
 
 ### 6.1 Tabla de servicios
 
@@ -792,18 +819,25 @@ Protocolo de comunicación seguro entre branas, operando sobre la capa de red.
 │  │  Aplicación: comandos, telemetría,  │    │
 │  │  archivos, notificaciones           │    │
 │  ├─────────────────────────────────────┤    │
-│  │  Sesión: autenticación mutua,       │    │
+│  │  Sesión: X25519 efímero,            │    │
 │  │  negociación de capacidades         │    │
 │  ├─────────────────────────────────────┤    │
-│  │  Seguridad: TLS / cifrado E2E,     │    │
-│  │  firma de mensajes                  │    │
+│  │  Seguridad: X25519 + ChaCha20-      │    │
+│  │  Poly1305; identidad aún pendiente  │    │
 │  ├─────────────────────────────────────┤    │
-│  │  Transporte: TCP / UDP / BLE        │    │
+│  │  Transporte: TCP baseline           │    │
 │  └─────────────────────────────────────┘    │
 └─────────────────────────────────────────────┘
 ```
 
+La baseline cifra con claves X25519 efímeras, pero todavía no autentica el
+transcript con una identidad persistente. Ver
+[`ADR-002`](ADR/ADR-002-brane-protocol.md).
+
 ### 9.2 Descubrimiento y pairing
+
+El siguiente flujo es el objetivo de pairing autenticado; las firmas, el trust
+store y la mediación completa por policy engine todavía no están implementados:
 
 ```text
 Brana Local                          Brana Externa
@@ -916,24 +950,25 @@ Ver carpeta [`docs/ADR/`](ADR/) para decisiones formales.
 
 | ADR | Título | Estado |
 |-----|--------|--------|
-| ADR-001 | Arquitectura híbrida modular inicial | ✅ Aceptada |
-| ADR-002 | Brane Protocol y capa de interconexión | 🔲 Pendiente |
-| ADR-003 | Diseño de syscalls mínimas | 🔲 Pendiente |
-| ADR-004 | Modelo de IPC (message passing) | 🔲 Pendiente |
-| ADR-005 | Estrategia de memoria virtual | 🔲 Pendiente |
+| [ADR-001](ADR/ADR-001-initial-architecture.md) | Arquitectura híbrida modular inicial | ✅ Aceptada |
+| [ADR-002](ADR/ADR-002-brane-protocol.md) | Brane Protocol y capa de interconexión | ✅ Baseline v0.1 |
+| [ADR-003](ADR/ADR-003-syscall-abi.md) | ABI mínima de syscalls x86_64 | ✅ Baseline v0.1 |
+| [ADR-004](ADR/ADR-004-ipc-message-passing.md) | IPC por message passing acotado | ✅ Baseline v0.1 |
+| [ADR-005](ADR/ADR-005-virtual-memory.md) | Memoria virtual y asignación física | ✅ Baseline v0.1 |
 
 ---
 
 ## 13. Próximos pasos de implementación
 
-1. ~~Definir estructura del repositorio~~ ✅
-2. ~~Implementar serial output~~ ✅
-3. Implementar IDT y manejo de excepciones (interrupt_manager).
-4. Implementar frame allocator y page table manager.
-5. Implementar heap allocator.
-6. Implementar scheduler básico (round-robin).
-7. Implementar syscall dispatcher (int 0x80).
-8. Implementar IPC básico (message passing).
-9. Implementar capability_manager en kernel.
-10. Crear proceso init y shell mínima.
-11. Diseñar brane protocol (ADR-002).
+1. Completar control transfers xHCI, descriptores USB/HID y endpoint interrupt
+   IN para el teclado conectado en Q35.
+2. Integrar USB mass storage con la block layer y mantener FAT32 read-only como
+   primer consumidor.
+3. Definir la matriz syscall → capability → audit event e implementar copia
+   segura de buffers ring 3.
+4. Conectar las syscalls IPC al core, autenticar sender y añadir wait queues.
+5. Extraer policy engine, capability broker, audit service e IA a procesos ring
+   3 conforme a ADR-001.
+6. Completar la matriz de hardware físico y el gate de release v1.0.
+
+El orden ejecutivo y los criterios de salida se mantienen en `ROADMAP.md`.
