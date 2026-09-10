@@ -11,6 +11,8 @@ All notable changes to Brane OS are documented here. The project follows
   Protocol v2, the syscall ABI, IPC message passing and virtual memory.
 - Phase 13 implementation specification for xHCI control transfers, USB
   descriptor validation, HID boot keyboard reports and QEMU acceptance tests.
+- Proposed xHCI event and transfer model with a single Event Ring dispatcher,
+  bounded polling, explicit DMA ownership and completion correlation.
 - Portable UEFI ISO packaging with BIOS and UEFI disk artifacts.
 - Automated ISO boot verification with QEMU, OVMF and TCG.
 - Tag-driven GitHub release workflow with SHA-256 verification.

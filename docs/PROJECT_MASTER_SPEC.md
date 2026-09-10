@@ -756,7 +756,7 @@ A partir de este documento se deberán crear y mantener:
 - [x] `TEST_PLAN.md`
 - [x] `ROADMAP.md`
 - [x] `ADR/ADR-001-*.md`
-- [x] `ADR/ADR-002-*.md` a `ADR/ADR-005-*.md`
+- [x] `ADR/ADR-002-*.md` a `ADR/ADR-006-*.md`
 - [x] `README.md` (índice documental)
 - [x] `RUNBOOK.md`
 - [x] `RELEASE.md`
@@ -778,6 +778,7 @@ A partir de este documento se deberán crear y mantener:
 | Policy store | 🔲 Abierto | No existe persistencia ni servicio `policy_engine` aislado |
 | Runtime IA | 🟡 Prototipo | `ai.rs` ejecuta observación/sugerencias en kernel; migración a user space pendiente |
 | Persistencia | 🟡 Parcial | Lectura FAT32 real; escrituras, journal y política de montaje pendientes |
+| Eventos xHCI | 🔲 Propuesta | ADR-006 define despachador único, correlación y polling acotado para completar USB HID |
 | Filesystem inicial | ✅ Baseline | VFS + RamFS + FAT32 read-only; evolución documentada en arquitectura |
 | Networking inicial | ✅ Baseline | virtio-net, Ethernet/ARP/IPv4, TCP/UDP, sockets y DNS estático |
 

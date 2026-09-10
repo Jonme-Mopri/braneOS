@@ -128,6 +128,10 @@ Endpoint ID. Los eventos válidos no relacionados no se descartan: se conservan
 en estado pendiente o se despachan al dueño correspondiente. ERDP y el cycle
 state avanzan exactamente una vez por evento consumido.
 
+El ownership, los límites de concurrencia y la transición desde el consumidor
+actual se formalizan en
+[`ADR-006`](ADR/ADR-006-xhci-event-transfer-model.md).
+
 ## 5. Octavo corte por incrementos
 
 ### 5.1 Transfer engine de EP0
@@ -319,6 +323,7 @@ El octavo corte se considera terminado cuando:
 - [Intel xHCI Requirements Specification](https://www.intel.com/content/www/us/en/content-details/868295/extensible-host-controller-interface-for-universal-serial-bus-xhci-requirements-specification-r1-2c.html)
 - [USB-IF Device Class Definition for HID 1.11](https://www.usb.org/sites/default/files/hid1_11.pdf)
 - [USB-IF USB 2.0 document set](https://www.usb.org/documents?search=usb+2.0)
+- [`ADR-006`: modelo de eventos y transferencias](ADR/ADR-006-xhci-event-transfer-model.md)
 
 Las especificaciones normativas prevalecen sobre este plan si existe una
 discrepancia de campos, tiempos o semántica de protocolo.

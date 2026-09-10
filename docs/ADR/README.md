@@ -12,6 +12,7 @@ y condiciones de revisión.
 | [ADR-003](ADR-003-syscall-abi.md) | ABI mínima de syscalls x86_64 | Aceptada para v0.1 |
 | [ADR-004](ADR-004-ipc-message-passing.md) | IPC por message passing acotado | Aceptada para v0.1 |
 | [ADR-005](ADR-005-virtual-memory.md) | Memoria virtual y asignación física | Aceptada para v0.1 |
+| [ADR-006](ADR-006-xhci-event-transfer-model.md) | Modelo de eventos y transferencias xHCI | Propuesta para Fase 13 |
 
 ## Estados
 

@@ -763,8 +763,10 @@ por polling, sin habilitar MSI/MSI-X.
 Una sonda `No Op Command` comprueba en Q35 que el controlador consume el TRB
 publicado mediante su doorbell, produce un `Command Completion Event` exitoso
 y acepta el avance de ERDP. El productor del Command Ring y el consumidor del
-Event Ring mantienen índice y cycle bit, por lo que pueden ignorar de forma
-segura un `Port Status Change Event` intercalado.
+Event Ring mantienen índice y cycle bit. La ruta actual avanza eventos no
+relacionados mientras espera un comando, pero todavía no los conserva para su
+dueño; el despachador único que corrige ese límite está definido en
+[`ADR-006`](ADR/ADR-006-xhci-event-transfer-model.md).
 
 Las Extended Capabilities `Supported Protocol` describen qué puertos pertenecen
 a USB 2 o USB 3 y qué Slot Type usar. El primer puerto conectado se resetea por
@@ -957,6 +959,7 @@ Ver carpeta [`docs/ADR/`](ADR/) para decisiones formales.
 | [ADR-003](ADR/ADR-003-syscall-abi.md) | ABI mínima de syscalls x86_64 | ✅ Baseline v0.1 |
 | [ADR-004](ADR/ADR-004-ipc-message-passing.md) | IPC por message passing acotado | ✅ Baseline v0.1 |
 | [ADR-005](ADR/ADR-005-virtual-memory.md) | Memoria virtual y asignación física | ✅ Baseline v0.1 |
+| [ADR-006](ADR/ADR-006-xhci-event-transfer-model.md) | Modelo de eventos y transferencias xHCI | 📝 Propuesta Fase 13 |
 
 ---
 
