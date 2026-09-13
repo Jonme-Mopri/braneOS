@@ -82,6 +82,11 @@ canal seguro completo entre procesos aislados.
 5. Versionar envelopes y correlation IDs para servicios ring 3.
 6. Medir memoria/contención antes de elegir slots variables o zero-copy.
 
+La evolución conserva estas colas como baseline interna y añade endpoints con
+generación, sender autenticado y wait queues según
+[`ADR-009`](ADR-009-ipc-endpoints-wait-queues.md) e
+[`IPC_RUNTIME.md`](../IPC_RUNTIME.md).
+
 ## Evidencia
 
 - `kernel/src/ipc.rs`
@@ -93,4 +98,5 @@ canal seguro completo entre procesos aislados.
 
 - `docs/ARCHITECTURE.md` §5.2.5
 - `docs/SECURITY_MODEL.md`
+- `docs/IPC_RUNTIME.md`
 - `docs/ROADMAP.md` Fase 3

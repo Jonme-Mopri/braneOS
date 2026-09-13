@@ -1,6 +1,6 @@
 # RUNBOOK.md - Build, CI y ejecucion local
 
-> Estado: operativo para desarrollo local. Última actualización: 2026-09-08.
+> Estado: operativo para desarrollo local. Última actualización: 2026-09-12.
 > Este documento describe el flujo
 > actual del repositorio, no el release final instalable.
 
@@ -260,6 +260,32 @@ y todavía faltan control transfers, descriptores HID y reportes interrupt IN.
 USB Mass Storage continúa como diseño posterior, documentado en
 [`USB_STORAGE.md`](USB_STORAGE.md); todavía no existe un target ejecutable para
 esa ruta.
+MSI/MSI-X también permanece sin implementar: xHCI y virtio-blk progresan por
+polling. La transición posterior a USB storage, sus fallbacks y el futuro target
+`make pci-interrupt-test` están especificados en
+[`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
+
+La entrada `syscall/sysret` también es una baseline funcional, no una frontera
+de aislamiento completa: el dispatcher no aplica capacidades de forma uniforme,
+`write`/IPC conservan semántica stub y no existe user-copy con contención de
+page faults. No deben pasarse punteros ring 3 no confiables a nuevos handlers
+hasta implementar [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md) y aceptar
+[`ADR-008`](ADR/ADR-008-syscall-mediation.md).
+Los tests `ipc_tests` prueban únicamente la cola kernel con IDs sintéticos; no
+demuestran sender autenticado, endpoints vivos ni bloqueo real. Esa transición
+se especifica en [`IPC_RUNTIME.md`](IPC_RUNTIME.md) y
+[`ADR-009`](ADR/ADR-009-ipc-endpoints-wait-queues.md).
+Los directorios de servicios de seguridad siguen vacíos, `RequestCap` no tiene
+handler y el boot concede directamente una capability amplia a task 1. Por
+tanto, ningún log actual demuestra `policy_engine`, `identity_service`, broker o
+audit service aislados. Su bootstrap, modo degradado y criterio `ControlReady`
+se definen en [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md) y
+[`ADR-010`](ADR/ADR-010-security-control-plane.md).
+El comando `ai status` también consulta un singleton ring 0 y sus dos
+observaciones de boot son sintéticas. No prueba telemetría, inferencia, sandbox
+ni actuación mediada. La extracción `ObserveOnly → Suggest → ActRestricted` y
+sus leases se especifican en [`AI_RUNTIME.md`](AI_RUNTIME.md) y
+[`ADR-011`](ADR/ADR-011-isolated-ai-runtime.md).
 
 ---
 

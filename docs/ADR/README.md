@@ -13,6 +13,11 @@ y condiciones de revisión.
 | [ADR-004](ADR-004-ipc-message-passing.md) | IPC por message passing acotado | Aceptada para v0.1 |
 | [ADR-005](ADR-005-virtual-memory.md) | Memoria virtual y asignación física | Aceptada para v0.1 |
 | [ADR-006](ADR-006-xhci-event-transfer-model.md) | Modelo de eventos y transferencias xHCI | Propuesta para Fase 13 |
+| [ADR-007](ADR-007-pci-interrupt-delivery.md) | Entrega MSI/MSI-X y trabajo diferido | Propuesta para Fase 13 |
+| [ADR-008](ADR-008-syscall-mediation.md) | Mediación de syscalls y memoria de usuario | Propuesta para Fase 14 |
+| [ADR-009](ADR-009-ipc-endpoints-wait-queues.md) | Endpoints IPC autenticados y wait queues | Propuesta para Fase 14 |
+| [ADR-010](ADR-010-security-control-plane.md) | Plano de control de seguridad en servicios ring 3 | Propuesta para Fase 14 |
+| [ADR-011](ADR-011-isolated-ai-runtime.md) | Runtime IA aislado y actuación mediante leases | Propuesta para Fase 14 |
 
 ## Estados
 

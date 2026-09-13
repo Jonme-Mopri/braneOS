@@ -2,7 +2,7 @@
 
 > Fase: **13 — Hardware I/O y almacenamiento**.
 > Estado: **diseño del corte posterior a USB HID; implementación pendiente**.
-> Última actualización: **2026-09-09**.
+> Última actualización: **2026-09-12**.
 
 ## 1. Objetivo
 
@@ -63,7 +63,9 @@ simultáneamente requiere antes reemplazar ese campo por una tabla fija de slots
 - UAS, CBI, dispositivos ópticos, UFI y subclasses distintos de `06h`.
 - Múltiples LUN, hubs, hotplug completo y varios discos simultáneos.
 - `READ(16)`/`READ CAPACITY(16)` y medios mayores al rango de LBA de 32 bits.
-- Comandos BOT en paralelo, streams xHCI, MSI/MSI-X y colas asíncronas.
+- Comandos BOT en paralelo, streams xHCI, colas asíncronas y MSI/MSI-X; la
+  transición de interrupciones pertenece al décimo corte definido en
+  [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
 - Recuperación transparente de desconexión durante una lectura.
 
 Un dispositivo fuera de este perfil se rechaza como `Unsupported` sin afectar
@@ -354,6 +356,7 @@ El corte se considera terminado cuando:
 - [T10 SCSI Block Commands 4](https://www.t10.org/members/w_sbc4.htm)
 - [QEMU USB emulation](https://www.qemu.org/docs/master/system/devices/usb)
 - [`ADR-006`: modelo de eventos y transferencias xHCI](ADR/ADR-006-xhci-event-transfer-model.md)
+- [`PCI_INTERRUPTS.md`: transición MSI/MSI-X](PCI_INTERRUPTS.md)
 
 Las especificaciones USB-IF y T10 prevalecen si este plan discrepa en layout,
 secuencia de transporte, recuperación o semántica de comandos.

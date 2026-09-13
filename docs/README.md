@@ -1,6 +1,6 @@
 # Documentación de Brane OS
 
-> Estado documental: **activo**. Última revisión transversal: **2026-09-09**.
+> Estado documental: **activo**. Última revisión transversal: **2026-09-12**.
 
 Este directorio reúne la visión, el diseño vigente, la evidencia operativa y
 los planes de evolución de Brane OS. La documentación distingue explícitamente
@@ -11,12 +11,14 @@ una descripción de diseño no implica por sí sola que exista código ejecutabl
 
 | Área | Estado verificable | Siguiente límite |
 |------|--------------------|------------------|
-| Kernel base, memoria, IPC y shell | ✅ Operativo en QEMU | Ampliar ABI y servicios ring 3 |
-| Seguridad y auditoría | 🟡 Baseline en kernel | Policy engine y broker como servicios aislados |
-| IA | 🟡 Observer/sugerencias prototipo | Runtime y orquestador fuera del kernel |
+| Kernel base, memoria, IPC y shell | ✅ Operativo en QEMU | Mediar syscalls y memoria ring 3 |
+| IPC entre procesos | 🟡 Colas kernel probadas en host | Endpoints, sender autenticado y wait queues |
+| Seguridad y auditoría | 🟡 Baseline en kernel | Cuatro servicios raíz y bootstrap fail-closed |
+| IA | 🟡 ObserveOnly sintético en kernel | Runtime/modelo aislados y telemetría real |
 | SMP/APIC | ✅ 4 vCPU en QEMU/TCG | Validación física |
 | Almacenamiento | ✅ virtio-blk + FAT32 read-only | USB mass storage y escritura persistente |
 | USB/xHCI | 🟡 Dispositivo direccionado | Control transfers, HID interrupt IN |
+| Interrupciones PCI | 🔲 Diseño MSI/MSI-X | Implementar primero sobre xHCI |
 | Release | 🟡 Artefactos y automatización listos | Matriz física y tag v1.0 |
 
 El foco de implementación vigente es la **Fase 13**: completar la enumeración
@@ -36,9 +38,14 @@ se mantienen en [`ROADMAP.md`](ROADMAP.md).
 | Probar en Parallels Desktop | [`PARALLELS.md`](PARALLELS.md) |
 | Registrar resultados en hardware | [`HARDWARE_MATRIX.md`](HARDWARE_MATRIX.md) |
 | Revisar límites de seguridad | [`SECURITY_MODEL.md`](SECURITY_MODEL.md) |
+| Endurecer syscalls y memoria ring 3 | [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md) |
+| Conectar IPC seguro y servicios ring 3 | [`IPC_RUNTIME.md`](IPC_RUNTIME.md) |
+| Separar identity, policy, broker y audit | [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md) |
 | Revisar el subsistema IA | [`AI_SUBSYSTEM.md`](AI_SUBSYSTEM.md) |
+| Extraer y aislar el runtime IA | [`AI_RUNTIME.md`](AI_RUNTIME.md) |
 | Implementar el siguiente corte USB HID | [`USB_XHCI.md`](USB_XHCI.md) |
 | Preparar USB Mass Storage sobre xHCI | [`USB_STORAGE.md`](USB_STORAGE.md) |
+| Migrar drivers PCI de polling a MSI/MSI-X | [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md) |
 | Entender decisiones arquitectónicas | [`ADR/README.md`](ADR/README.md) |
 | Consultar cambios por versión | [`../CHANGELOG.md`](../CHANGELOG.md) |
 

@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §18.  
 > Estado: **Activo**.  
-> Última actualización: **2026-09-09**
+> Última actualización: **2026-09-12**
 
 ---
 
@@ -55,6 +55,13 @@ Brane OS utiliza una estrategia de testing multinivel que cubre desde unidades a
 → capability broker, agente IA → policy engine y broker → audit service. Los
 harnesses actuales no demuestran esos servicios porque aún no existen como
 procesos aislados.
+La frontera ring 3 se detalla en
+[`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md); sender, endpoints, blocking y
+correlación IPC se detallan en [`IPC_RUNTIME.md`](IPC_RUNTIME.md). Bootstrap,
+roles, commit de capabilities y reinicio fail-closed se especifican en
+[`SECURITY_SERVICES.md`](SECURITY_SERVICES.md). El aislamiento de orchestrator/
+modelo, telemetry gaps y leases single-use se detallan en
+[`AI_RUNTIME.md`](AI_RUNTIME.md).
 
 **Herramientas:** Tests de integración en Rust, Python harnesses.
 
@@ -105,7 +112,9 @@ procesos aislados.
 
 **Cobertura objetivo pendiente:** invocaciones privilegiadas negativas desde
 ring 3, mediación uniforme del dispatcher, solicitudes IA fuera de scope,
-integridad criptográfica de tokens y persistencia del audit log.
+integridad criptográfica de tokens y persistencia del audit log. Los casos de
+schemas hostiles, gaps, sandbox y lease replay están definidos en
+[`AI_RUNTIME.md`](AI_RUNTIME.md).
 
 ---
 
@@ -122,7 +131,8 @@ integridad criptográfica de tokens y persistencia del audit log.
 **Escenario objetivo pendiente:** anomalía → observación IA → propuesta →
 policy engine → ejecución o denegación → auditoría correlacionada. Este flujo no
 se considera cubierto hasta que el orquestador y el policy engine existan fuera
-del kernel.
+del kernel, el modelo tenga un address space separado y una ejecución consuma
+exactamente una lease ligada a la propuesta.
 
 ---
 
@@ -219,6 +229,21 @@ La validación local equivalente recomendada está documentada en
 18. Fase 13: USB Mass Storage Bulk-Only, perfil SCSI read-only, registro como
     `BlockDevice` y montaje FAT32; depende del corte HID y se especifica en
     [`USB_STORAGE.md`](USB_STORAGE.md).
+19. Fase 13: capability walker PCI, MSI-X con fallback MSI/polling y dispatcher
+    xHCI diferido; diseño y criterio de salida en
+    [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
+20. Fase 14: metadata exhaustiva de syscalls, user-copy, mediación por
+    capability, auditoría terminal y retorno ring 3 seguro; especificación en
+    [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md).
+21. Fase 14: endpoints IPC generacionales, sender autenticado, Send/Recv reales
+    y wait cells sin lost wakeup en SMP; especificación en
+    [`IPC_RUNTIME.md`](IPC_RUNTIME.md).
+22. Fase 14: cuatro servicios de seguridad ring 3, bootstrap sin ciclos, commit
+    exclusivo del broker, auditoría con gaps y reinicio fail-closed;
+    especificación en [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md).
+23. Fase 14: orchestrator/model IA en procesos separados, telemetría tipada,
+    budgets, provenance y primera acción con lease single-use; especificación en
+    [`AI_RUNTIME.md`](AI_RUNTIME.md).
 
 ## 7. Make targets disponibles
 

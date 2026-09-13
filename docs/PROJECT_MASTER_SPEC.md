@@ -2,13 +2,15 @@
 
 > Versión de arquitectura: **v0.1**. Versión de software: **0.1.0**.
 > Estado: **baseline implementada; plataforma en evolución**.
-> Última actualización: **2026-09-09**.
+> Última actualización: **2026-09-12**.
 
 Este documento fija la visión y los requisitos de largo plazo. El estado
 ejecutable se detalla en [`ROADMAP.md`](ROADMAP.md), y la separación entre
 arquitectura objetivo e implementación actual en
 [`ARCHITECTURE.md`](ARCHITECTURE.md), [`SECURITY_MODEL.md`](SECURITY_MODEL.md) y
-[`AI_SUBSYSTEM.md`](AI_SUBSYSTEM.md).
+[`AI_SUBSYSTEM.md`](AI_SUBSYSTEM.md). La extracción del plano de control se
+detalla en [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md), y el runtime IA ring
+3 en [`AI_RUNTIME.md`](AI_RUNTIME.md).
 
 ## 1. Identidad del proyecto
 
@@ -545,6 +547,11 @@ brane_os/
     ROADMAP.md
     USB_XHCI.md
     USB_STORAGE.md
+    PCI_INTERRUPTS.md
+    SYSCALL_SECURITY.md
+    IPC_RUNTIME.md
+    SECURITY_SERVICES.md
+    AI_RUNTIME.md
     RUNBOOK.md
     RELEASE.md
     HARDWARE_MATRIX.md
@@ -757,13 +764,18 @@ A partir de este documento se deberán crear y mantener:
 - [x] `TEST_PLAN.md`
 - [x] `ROADMAP.md`
 - [x] `ADR/ADR-001-*.md`
-- [x] `ADR/ADR-002-*.md` a `ADR/ADR-006-*.md`
+- [x] `ADR/ADR-002-*.md` a `ADR/ADR-011-*.md`
 - [x] `README.md` (índice documental)
 - [x] `RUNBOOK.md`
 - [x] `RELEASE.md`
 - [x] `HARDWARE_MATRIX.md`
 - [x] `USB_XHCI.md` (diseño del octavo corte de la Fase 13)
 - [x] `USB_STORAGE.md` (diseño del noveno corte de la Fase 13)
+- [x] `PCI_INTERRUPTS.md` (diseño del décimo corte de la Fase 13)
+- [x] `SYSCALL_SECURITY.md` (prerrequisito de aislamiento de la Fase 14)
+- [x] `IPC_RUNTIME.md` (endpoints y wait queues de servicios de la Fase 14)
+- [x] `SECURITY_SERVICES.md` (bootstrap y plano de control de la Fase 14)
+- [x] `AI_RUNTIME.md` (aislamiento, telemetría y actuación IA de la Fase 14)
 
 ---
 
@@ -773,14 +785,16 @@ A partir de este documento se deberán crear y mantener:
 |----------|---------------|-------------------------|
 | Boot path | ✅ Baseline | Crate `bootloader` 0.11, imágenes BIOS/UEFI e ISO; ver `RUNBOOK.md` |
 | Memoria virtual | ✅ Baseline | `OffsetPageTable`, direct map, heap y ventanas MMIO; formalizada en ADR-005 |
-| ABI de syscalls | 🟡 Parcial | ADR-003 registra 28 números y `syscall/sysret`; handlers y versionado siguen incompletos |
-| IPC | ✅ Baseline | ADR-004 registra colas ring por tarea y mensajes de hasta 4 KiB |
+| ABI de syscalls | 🟡 Parcial | ADR-003 fija la ABI; ADR-008 y `SYSCALL_SECURITY.md` definen mediación, user-copy y retorno seguro pendientes |
+| IPC | 🟡 Baseline | ADR-004 registra colas de 4 KiB; ADR-009 y `IPC_RUNTIME.md` definen endpoints, sender autenticado y wait queues pendientes |
 | Brane Protocol v2 | 🟡 Parcial | ADR-002 registra framing, sesión y cifrado; identidad/policy siguen pendientes |
-| Audit log | ✅ Volátil | Ring buffer de 512 eventos; formato persistente aún abierto |
-| Policy store | 🔲 Abierto | No existe persistencia ni servicio `policy_engine` aislado |
-| Runtime IA | 🟡 Prototipo | `ai.rs` ejecuta observación/sugerencias en kernel; migración a user space pendiente |
+| Audit log | 🟡 Volátil | Ring de 512 eventos; ADR-010 define cursor/gaps y drainer, aún sin implementar |
+| Policy store | 🔲 Diseño | `SECURITY_SERVICES.md` define policy bootstrap/persistente; servicio aún inexistente |
+| Plano de control de seguridad | 🔲 Propuesta | ADR-010 define roles audit → identity → policy → broker y commit kernel |
+| Runtime IA | 🟡 Prototipo | `ai.rs` observa strings sintéticos en kernel; ADR-011 define migración y leases pendientes |
 | Persistencia | 🟡 Parcial | Lectura FAT32 real; escrituras, journal y política de montaje pendientes |
 | Eventos xHCI | 🔲 Propuesta | ADR-006 define despachador único, correlación y polling acotado para completar USB HID |
+| Interrupciones PCI | 🔲 Propuesta | ADR-007 y `PCI_INTERRUPTS.md` definen MSI-X → MSI → polling, vectores fijos y trabajo diferido |
 | Filesystem inicial | ✅ Baseline | VFS + RamFS + FAT32 read-only; evolución documentada en arquitectura |
 | Networking inicial | ✅ Baseline | virtio-net, Ethernet/ARP/IPv4, TCP/UDP, sockets y DNS estático |
 

@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §13–§14.
 > Estado: **baseline implementada; separación de servicios incompleta**.
-> Última actualización: **2026-09-09**.
+> Última actualización: **2026-09-12**.
 
 ## 1. Garantías y no-garantías de la versión 0.1
 
@@ -18,6 +18,7 @@ completa:
 - el dispatcher de syscalls no aplica una comprobación de capacidades uniforme;
 - `policy_engine`, `capability_broker`, `identity_service` y `audit_service` no
   existen aún como servicios aislados en ring 3;
+- el boot concede directamente a la tarea 1 una capability de sistema amplia;
 - las capacidades y el audit log son volátiles;
 - las pruebas QEMU de seguridad validan invariantes de boot, mientras que las
   denegaciones detalladas se ejercitan principalmente en unit tests host.
@@ -83,6 +84,13 @@ La validación central de capacidades en el dispatcher sigue pendiente. Hasta
 que cada syscall privilegiada invoque una política de autorización documentada,
 la presencia de `CapabilityManager` no implica mediación completa.
 
+Tampoco existe una capa `copy_from_user`/`copy_to_user`: `write` no desreferencia
+su buffer y las rutas de señal todavía no validan de forma completa handler,
+contexto de retorno ni canonicalidad antes de `sysret`. La matriz de los 28
+números, las reglas de scope, el orden de locks y las pruebas ring 3 requeridas
+se definen en [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md) y
+[`ADR-008`](ADR/ADR-008-syscall-mediation.md).
+
 ### 3.4 Protecciones de hardware y parsers
 
 La baseline usa GDT/TSS/IST, page tables, páginas MMIO `NO_CACHE`/`NO_EXECUTE`,
@@ -121,6 +129,14 @@ El broker no sustituye la comprobación en kernel. Una decisión `allow` sólo
 autoriza emitir una capacidad limitada; el subsistema que ejecuta la operación
 debe verificarla otra vez.
 
+El orden de bootstrap es `audit → identity → policy → broker`. Roles internos
+no transferibles bindean cada autoridad a proceso y generación; después de
+`ControlReady`, `init` ya no conserva un grant raíz. El formato de mensajes,
+receipt single-use de policy, commit exclusivo del broker, cursor/gaps de
+auditoría y comportamiento ante reinicios están definidos en
+[`SECURITY_SERVICES.md`](SECURITY_SERVICES.md) y
+[`ADR-010`](ADR/ADR-010-security-control-plane.md).
+
 ## 5. Política mínima para capacidades futuras
 
 Una capacidad persistible o transferible debe incluir, como mínimo:
@@ -143,12 +159,16 @@ un ADR antes de exponer capacidades entre máquinas.
 
 | Amenaza | Control actual | Brecha principal |
 |---------|----------------|------------------|
-| Syscall inválida | Rechazo por número y tipos acotados | Mediación por capability incompleta |
+| Syscall inválida | Rechazo por número | Metadata, auditoría y tipos centralizados pendientes |
+| Puntero ring 3 hostil | `write` evita desreferenciarlo | Sin user-copy ni page-fault fixup |
+| Retorno/señal manipulado | Frame guardado en kernel | Handler/RIP/RSP y `sysret` aún sin validación completa |
+| Sender IPC forjado o destino reciclado | Colas kernel con límites | Sender aún suministrado y destino indexado por TaskId |
 | Tarea sin permiso | `CapabilityManager::check` falla cerrado | No todos los call sites lo invocan |
+| Servicio reiniciado hereda autoridad | Ningún servicio ring 3 real aún | Role binding y generaciones pendientes |
 | Token revocado | Eliminación inmediata de tabla | Sin epochs ni persistencia |
 | Evento borrado por saturación | Ring acotado sin corrupción | Pérdida del evento antiguo |
 | Input de disco/red/firmware hostil | Parsers validados, límites y fuzz determinista | Cobertura no equivale a prueba formal |
-| Salida IA hostil | Acciones restringidas por enum | Broker/policy/sandbox pendientes |
+| Salida IA hostil | Acciones restringidas por enum | Sandbox, schemas y leases de `AI_RUNTIME.md` pendientes |
 | Dispositivo DMA malicioso | Buffers contiguos y rangos controlados | Sin IOMMU |
 | Peer Brane falso/replay | Sesión X25519 + AEAD y nonce | Identidad persistente/PKI pendiente |
 | Exposición por logs | Serial facilita diagnóstico temprano | La sesión imprime parte del secreto X25519 |
@@ -172,13 +192,19 @@ Antes de declarar endurecimiento de producción se requieren pruebas desde ring
 3 que invoquen realmente operaciones privilegiadas, validación negativa de
 cada syscall, saturación/persistencia del audit log, aislamiento entre procesos,
 IOMMU o una política DMA explícita y revisión del protocolo de identidad Brane.
+Los criterios específicos de la frontera syscall se mantienen en
+[`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md).
 
 ## 8. Decisiones abiertas y próximos pasos
 
 1. Definir la matriz syscall → permiso → scope → evento de auditoría.
 2. Aplicar esa matriz dentro del dispatcher y añadir pruebas ring 3 negativas.
-3. Diseñar `policy_engine`, `capability_broker` e `identity_service` como
-   procesos separados con contratos IPC versionados.
-4. Elegir formato autenticado, expiración y revocación de capacidades.
-5. Persistir el audit log con integridad y política explícita ante saturación.
-6. Diseñar aislamiento DMA/IOMMU y raíces de confianza para peers Brane.
+3. Implementar endpoints y wait queues de [`IPC_RUNTIME.md`](IPC_RUNTIME.md),
+   después ejecutar los cuatro servicios raíz según
+   [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md).
+4. Reemplazar el grant amplio de task 1 por manifest y roles bootstrap.
+5. Implementar expiración/revocación generacional y commit exclusivo del broker.
+6. Persistir el audit log con cursor, gaps, integridad y política de saturación.
+7. Extraer IA en `ObserveOnly` y habilitar acciones sólo con los gates de
+   [`AI_RUNTIME.md`](AI_RUNTIME.md).
+8. Diseñar aislamiento DMA/IOMMU y raíces de confianza para peers Brane.

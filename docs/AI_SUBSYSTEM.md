@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §11–§12 y §14.
 > Estado: **baseline funcional en kernel; arquitectura de servicios pendiente**.
-> Última actualización: **2026-09-08**.
+> Última actualización: **2026-09-12**.
 
 ## 1. Alcance y límite actual
 
@@ -19,7 +19,8 @@ salud y seguridad. No hay modelo ML/LLM, recolección automática de telemetría
 servicio `ai_orchestrator` en ring 3 ni ejecución general de acciones.
 
 Esto significa que el prototipo valida contratos lógicos, pero todavía no
-cumple el aislamiento final previsto para la IA.
+cumple el aislamiento final previsto para la IA. La transición ejecutable se
+especifica en [`AI_RUNTIME.md`](AI_RUNTIME.md).
 
 ## 2. Implementación disponible
 
@@ -85,12 +86,25 @@ context_collector ──▶ model_runtime ──▶ decision_planner
 | `safety_filter` | Aplicar veto local por riesgo y allowlist | 🔲 Directorio reservado |
 | `ai_orchestrator` | Coordinar el ciclo y sus timeouts por IPC | 🔲 Directorio reservado |
 | `CapabilityManager` | Verificar permisos ya concedidos | ✅ Baseline en kernel |
+| `identity_service` | Autenticar el principal que origina la propuesta | 🔲 Servicio pendiente |
 | `policy_engine` | Decidir allow/deny/escalate con identidad y contexto | 🔲 Servicio pendiente |
+| `capability_broker` | Solicitar al kernel un grant acotado y auditable | 🔲 Servicio pendiente |
 | `audit_service` | Persistir la traza completa | 🟡 Ring volátil en kernel |
 
 Los cinco primeros componentes deben ejecutarse fuera del kernel. El kernel
 sólo debe exponer telemetría autorizada, IPC, comprobación de capacidades y
 hooks de auditoría.
+
+El orden `audit → identity → policy → broker`, sus roles no transferibles y el
+commit exclusivo de capabilities se definen en
+[`SECURITY_SERVICES.md`](SECURITY_SERVICES.md). `ai_orchestrator` se incorpora
+después de `ControlReady` como cliente ordinario: no recibe autoridad de broker,
+policy ni identity.
+
+`model_runtime` se ejecuta en otro address space, sin acceso directo a broker,
+VFS, red o audit. Los schemas, budgets y leases que hacen verificable esa
+separación se detallan en [`AI_RUNTIME.md`](AI_RUNTIME.md) y
+[`ADR-011`](ADR/ADR-011-isolated-ai-runtime.md).
 
 ## 4. Contrato de propuesta
 
@@ -124,6 +138,10 @@ auditoría correlacionado.
 6. Observaciones y resultados sensibles no salen de su scope autorizado.
 7. `ActRestricted` permanece deshabilitado hasta integrar broker, policy engine
    y comprobación efectiva de capacidades.
+8. Reiniciar IA nunca conserva endpoints, requests o capabilities de la
+   generación anterior.
+9. Toda actuación consume una lease single-use ligada a propuesta, target,
+   parámetros, owner y expiración; un modo no equivale a una capability.
 
 ## 6. Pruebas
 
@@ -145,13 +163,22 @@ auditoría correlacionado.
 
 ## 7. Decisiones abiertas y próximos pasos
 
-1. Versionar el contrato binario de contexto, propuesta y decisión.
-2. Elegir el primer runtime determinista y su presupuesto de CPU/memoria.
-3. Implementar `policy_engine` y `capability_broker` como servicios ring 3.
-4. Mover el motor de IA fuera del kernel y conectar la telemetría por IPC.
-5. Añadir persistencia verificable de decisiones sin mezclarla con aprendizaje.
-6. Sólo entonces evaluar una allowlist inicial para `ActRestricted`.
+1. Versionar telemetría, snapshot, finding y propuesta según
+   [`AI_RUNTIME.md`](AI_RUNTIME.md).
+2. Implementar un runtime determinista sin JIT/red/VFS y presupuestos estrictos.
+3. Implementar el plano de control ring 3 y alcanzar `ControlReady` según
+   [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md).
+4. Arrancar orchestrator/model en procesos distintos y retirar `AI_ENGINE`.
+5. Validar `ObserveOnly`, después `Suggest`, con provenance, gaps y reinicios.
+6. Sólo entonces evaluar `AlertUser` con executor y lease single-use.
 
 El mecanismo de aprendizaje, un LLM externo y el feedback loop quedan fuera de
 la baseline hasta cerrar aislamiento, política, auditoría persistente y pruebas
 de denegación.
+
+## 8. Referencias
+
+- [`AI_RUNTIME.md`](AI_RUNTIME.md)
+- [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md)
+- [`SECURITY_MODEL.md`](SECURITY_MODEL.md)
+- [`ADR-011`](ADR/ADR-011-isolated-ai-runtime.md)

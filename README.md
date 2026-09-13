@@ -66,6 +66,11 @@ Start with the [documentation index](docs/README.md). Key references are the
 [runbook](docs/RUNBOOK.md), [test plan](docs/TEST_PLAN.md),
 [USB/xHCI implementation plan](docs/USB_XHCI.md),
 [USB storage implementation plan](docs/USB_STORAGE.md),
+[PCI interrupt implementation plan](docs/PCI_INTERRUPTS.md),
+[syscall security plan](docs/SYSCALL_SECURITY.md),
+[IPC runtime plan](docs/IPC_RUNTIME.md),
+[security services plan](docs/SECURITY_SERVICES.md),
+[isolated AI runtime plan](docs/AI_RUNTIME.md),
 [architecture decisions](docs/ADR/README.md), and [changelog](CHANGELOG.md).
 
 ---

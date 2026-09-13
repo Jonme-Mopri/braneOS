@@ -89,6 +89,11 @@ subconjunto llega al dispatcher y varias rutas (`exit`, `write`, `ipc_send` y
 4. Probar llamadas reales desde ring 3, incluidos punteros inválidos y carreras.
 5. Documentar compatibilidad, versionado y política de deprecación.
 
+La matriz, el pipeline central y la política de memoria de usuario se concretan
+en [`ADR-008`](ADR-008-syscall-mediation.md) y
+[`SYSCALL_SECURITY.md`](../SYSCALL_SECURITY.md). ADR-003 conserva numeración y
+convención; ADR-008 define las condiciones de mediación antes de ampliar la ABI.
+
 ## Evidencia
 
 - `kernel/src/usermode.rs`
@@ -100,4 +105,5 @@ subconjunto llega al dispatcher y varias rutas (`exit`, `write`, `ipc_send` y
 
 - `docs/ARCHITECTURE.md` §5.2.4
 - `docs/SECURITY_MODEL.md`
+- `docs/SYSCALL_SECURITY.md`
 - `docs/ROADMAP.md` Fases 3 y 10

@@ -74,7 +74,8 @@ traducir HID o llamar a `TTY::on_char`.
 
 MSI/MSI-X, hotplug completo y wait queues quedan fuera de este corte. Una futura
 ruta por interrupciones deberá reutilizar el mismo despachador y cambiar sólo
-el mecanismo que provoca su ejecución.
+el mecanismo que provoca su ejecución; esa transición se formaliza en
+[`ADR-007`](ADR-007-pci-interrupt-delivery.md).
 
 ### Publicación y visibilidad
 
@@ -176,4 +177,5 @@ límites que permanezcan se registrarán sin alterar la decisión histórica.
 - [`USB_XHCI.md`](../USB_XHCI.md)
 - [`ARCHITECTURE.md`](../ARCHITECTURE.md) §7.6
 - [`TEST_PLAN.md`](../TEST_PLAN.md)
+- [`ADR-007`: entrega de interrupciones PCI](ADR-007-pci-interrupt-delivery.md)
 - [Intel xHCI Requirements Specification](https://www.intel.com/content/www/us/en/content-details/868295/extensible-host-controller-interface-for-universal-serial-bus-xhci-requirements-specification-r1-2c.html)

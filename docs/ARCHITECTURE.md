@@ -1,7 +1,7 @@
 # ARCHITECTURE.md — Brane OS
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §8–§10.  
-> Estado: **vigente** — baseline v0.1. Última actualización: **2026-09-09**.
+> Estado: **vigente** — baseline v0.1. Última actualización: **2026-09-12**.
 
 La arquitectura describe tanto el estado implementado como el objetivo por
 capas. Los componentes marcados como futuros no deben interpretarse como
@@ -285,8 +285,11 @@ pub trait InterruptController {
 | 0–31 | Excepciones CPU | Division error, page fault, double fault, etc. |
 | 32 | Timer | PIT/APIC timer tick |
 | 33 | Keyboard | Interrupciones de teclado |
-| 34–47 | Hardware | IRQs de dispositivos |
-| 0x80 | Syscall | Interrupción de software para syscalls |
+| `0x22..=0x3F` | Hardware legacy | Reserva para IRQs adicionales |
+| `0x40..=0x4F` | PCI | Rango planeado para MSI/MSI-X |
+| `0x80` | Syscall legacy | Reservado; la baseline usa `syscall`/`sysret` |
+| `0xF0` | SMP | Sonda IPI dirigida a los APs |
+| `0xFF` | LAPIC | Vector spurious |
 
 **Estado de implementación SMP/APIC (Fase 12):** el descubrimiento ACPI/MADT
 acepta procesadores xAPIC y x2APIC, sobrescritura de la dirección del LAPIC e
@@ -297,6 +300,13 @@ el LAPIC, programa IRQ0/IRQ1 en el I/O APIC respetando polaridad/disparo y cambi
 el EOI de la IDT al LAPIC dentro de una transición con interrupciones desactivadas.
 Si la validación falla, el PIC 8259 permanece como fallback; la misma secuencia se
 repite después de ACPI S3.
+
+La evolución MSI/MSI-X reserva de antemano `0x40..=0x4F`, prefiere una entrada
+MSI-X, cae a MSI de un mensaje y conserva polling si la plataforma no puede
+armar ninguna. Los handlers sólo publicarán trabajo pendiente; el protocolo del
+driver continuará fuera del interrupt frame. Esta decisión aún no está
+implementada y se especifica en [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md) y
+[`ADR-007`](ADR/ADR-007-pci-interrupt-delivery.md).
 
 El módulo `kernel/src/smp.rs` convierte las entradas de procesador en un plan
 determinista de hasta 32 CPUs. Rechaza APIC ID duplicados o un conjunto sin CPUs
@@ -454,6 +464,13 @@ reserva para el primer salto a ring 3. De los 28 números reservados sólo un
 subconjunto tiene dispatch y varias operaciones conservan semántica stub. No hay
 fallback `int 0x80` conectado. Ver [`ADR-003`](ADR/ADR-003-syscall-abi.md).
 
+La frontera objetivo añade una tabla exhaustiva para los 28 números, identidad
+derivada del estado per-CPU, capability check central, copia segura de todas las
+páginas user, auditoría terminal y validación de RIP/RSP/RFLAGS antes de
+`sysret`. Este hardening sigue pendiente y es prerrequisito para aislar servicios
+de Fase 14; ver [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md) y
+[`ADR-008`](ADR/ADR-008-syscall-mediation.md).
+
 ---
 
 #### 5.2.5 IPC Core
@@ -493,6 +510,15 @@ Proceso A ◀──recv()── │ (kernel)  │ ◀──send()──── Pr
 La baseline mantiene 64 colas × 16 mensajes, es no bloqueante y usa un mutex
 global. El sender autenticado, capabilities y la conexión efectiva con syscalls
 siguen pendientes. Ver [`ADR-004`](ADR/ADR-004-ipc-message-passing.md).
+
+La evolución para servicios sustituye TaskId público por handles de endpoint con
+generación, separa `ServiceId` del task que lo ejecuta y usa una wait cell por
+tarea para coordinar `Armed/Parking/Sleeping/Notified` sin anidar locks
+IPC/scheduler.
+`Send`/`Recv` se conectarán primero en modo no bloqueante; timeout, cancelación y
+`SendRecv` correlacionado se habilitarán después de probar park/notify en SMP.
+Ver [`IPC_RUNTIME.md`](IPC_RUNTIME.md) y
+[`ADR-009`](ADR/ADR-009-ipc-endpoints-wait-queues.md).
 
 ---
 
@@ -535,6 +561,12 @@ CapabilityManager::revoke(cap_id) -> Result<(), CapError>
 
 Expiración, autenticidad criptográfica, delegación y persistencia son parte del
 contrato futuro, no campos implementados en v0.1.
+La asignación concreta de permisos/scopes a syscalls se mantiene en
+[`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md); ninguna tabla allí descrita debe
+presentarse como activa hasta que el dispatcher invoque `CapabilityManager`.
+La emisión futura permanece en kernel, pero sólo acepta commits del broker
+bindeado durante bootstrap; roles, expiración y teardown generacional se
+especifican en [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md).
 
 ---
 
@@ -576,6 +608,8 @@ pub enum AuditResult {
 
 El audit log actual es un ring volátil de 512 eventos. No contiene metadata
 arbitraria ni persistencia; esas funciones pertenecen al futuro audit service.
+El drainer objetivo usa cursor, secuencias y gaps sin hacer IPC desde el append
+kernel; ver [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md).
 
 ---
 
@@ -622,6 +656,17 @@ Esta sección describe la arquitectura objetivo. En v0.1, `init` y varios
 servicios se representan en la tabla de procesos, pero no ejecutan todavía sus
 implementaciones completas como binarios ring 3 aislados.
 
+Antes de moverlos, la frontera syscall de ADR-008 y los endpoints/wait queues de
+ADR-009 deben demostrar identidad, capabilities, user-copy y wakeup real entre
+procesos. Un directorio reservado en `services/` no constituye un servicio
+ejecutable ni un endpoint registrado.
+
+El bootstrap y la autoridad de los cuatro servicios raíz se definen en
+[`SECURITY_SERVICES.md`](SECURITY_SERVICES.md) y
+[`ADR-010`](ADR/ADR-010-security-control-plane.md). El kernel conserva
+enforcement, tabla de capabilities y audit ring; identity, policy, broker y
+persistencia ejecutan decisiones separadas en ring 3.
+
 ### 6.1 Tabla de servicios
 
 | Servicio | Función | Dependencias | Fase |
@@ -630,12 +675,12 @@ implementaciones completas como binarios ring 3 aislados.
 | `process_manager` | Gestión del ciclo de vida de procesos | Kernel, IPC | 4 |
 | `filesystem_service` | VFS y acceso a archivos | Kernel, Drivers | 4 |
 | `device_manager` | Hot-plug y gestión de dispositivos | Kernel, Drivers | 4 |
-| `policy_engine` | Evaluación de reglas de política | IPC, Cap Manager | 4 |
-| `audit_service` | Persistencia y consulta de audit logs | IPC, Audit Hooks | 4 |
-| `capability_broker` | Mediador de acceso para acciones privilegiadas | Policy Engine, Cap Manager | 6 |
-| `identity_service` | Autenticación y gestión de identidades | IPC | 6 |
+| `policy_engine` | Evaluación de reglas de política | Identity, IPC, Audit | 14 |
+| `audit_service` | Persistencia y consulta de audit logs | IPC, Audit Hooks | 14 |
+| `capability_broker` | Mediador de acceso para acciones privilegiadas | Identity, Policy, Cap Manager | 14 |
+| `identity_service` | Autenticación y gestión de identidades | IPC, Audit | 14 |
 | `network_manager` | Stack de red | Drivers, IPC | Futuro |
-| `ai_orchestrator` | Coordinación del subsistema IA | Todos los de seguridad | 5–6 |
+| `ai_orchestrator` | Coordinación del subsistema IA | Todos los de seguridad | 14 |
 | **`brane_connector`** | **Descubrimiento y conexión de branas externas** | Network, Cap Broker, Identity | **Futuro** |
 
 ### 6.2 Secuencia de inicio de servicios
@@ -643,9 +688,9 @@ implementaciones completas como binarios ring 3 aislados.
 ```text
 init
  ├──▶ audit_service        (1°, para registrar todo desde el inicio)
- ├──▶ policy_engine         (2°, para evaluar permisos)
- ├──▶ capability_broker     (3°, para mediar acceso)
- ├──▶ identity_service      (4°, autenticación)
+ ├──▶ identity_service      (2°, principals bootstrap)
+ ├──▶ policy_engine         (3°, para evaluar permisos)
+ ├──▶ capability_broker     (4°, se habilita al final del control plane)
  ├──▶ process_manager       (5°, gestión de procesos)
  ├──▶ device_manager        (6°, hardware)
  ├──▶ filesystem_service    (7°, archivos)
@@ -654,6 +699,12 @@ init
  ├──▶ brane_connector       (10°, interconexión)
  └──▶ shell                 (último, interfaz de usuario)
 ```
+
+Audit e identity arrancan inicialmente con datos incluidos en la imagen; sus
+backends persistentes se activan después del filesystem. Los handles bootstrap
+se entregan al crear cada proceso y no dependen de lookup público. Sólo al tener
+las cuatro generaciones saludables se alcanza `ControlReady` y se aceptan
+grants ordinarios; un fallo posterior entra en modo degradado fail-closed.
 
 ---
 
@@ -681,10 +732,10 @@ pub trait Driver: Send + Sync {
 | Timer (PIT / APIC) | ✅ Implementado | 0/32 | Ticks y EOI LAPIC/PIC |
 | Keyboard (PS/2) | ✅ Implementado | 1/33 | Entrada TTY básica |
 | Block layer | ✅ Implementado | — | Registry, validación y dispatch sectorial |
-| Disk (virtio-blk) | ✅ Legacy | PCI | Virtqueue por polling y DMA bajo 4 GiB |
+| Disk (virtio-blk) | ✅ Legacy | Polling PCI | Virtqueue por polling y DMA bajo 4 GiB |
 | Disk (USB) | 🔲 Pendiente | Polling | BOT/SCSI read-only diseñado en `USB_STORAGE.md` |
 | Network (virtio-net) | ✅ Base integrada | PCI | Discovery compartido + transporte legacy I/O |
-| USB/xHCI | 🔄 Enumeración base | Polling | Reset de host/puerto, Command/Event Rings, slot, contextos y Address Device sobre PCIe MMIO |
+| USB/xHCI | 🔄 Enumeración base | Polling; MSI diseñado | Reset de host/puerto, Command/Event Rings, slot, contextos y Address Device sobre PCIe MMIO |
 | Bluetooth | 🔲 Futuro | — | Para mobile companion |
 
 ### 7.3 Inventario PCI
@@ -711,6 +762,22 @@ la decodificación del dispositivo y restaura todos los registros incluso ante
 errores. Las apertures MMIO verificadas se instalan en una ventana virtual
 acotada con páginas `NO_CACHE`/`NO_EXECUTE`, reutilizando duplicados exactos y
 rechazando aliases solapados.
+
+#### 7.3.1 Interrupciones PCI objetivo
+
+El siguiente corte posterior a USB funcional añadirá un walker acotado de
+capabilities convencionales y un registry fijo para los vectores
+`0x40..=0x4F`. MSI-X con una entrada será la ruta preferida; MSI con un mensaje
+y el polling actual serán fallbacks obligatorios. La primera entrega se dirige
+al BSP en modo xAPIC y despierta al dispatcher xHCI sin consumir el Event Ring
+dentro del handler.
+
+Config space y tablas MSI-X se programarán enmascarados y con rollback antes de
+publicar una ruta como armada. BIR y offsets se validarán contra BARs medidos;
+los top halves no tomarán locks de PCI config, block, VFS, TTY o USB. El diseño,
+la secuencia S3 y los criterios Q35 se mantienen en
+[`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md); el ownership queda registrado en
+[`ADR-007`](ADR/ADR-007-pci-interrupt-delivery.md).
 
 ### 7.4 Block layer
 
@@ -813,9 +880,16 @@ ruta completa VFS → FAT32 → block layer → virtio-blk → DMA.
 |-----------|-------------|------|
 | Shell mínima | Interfaz de comandos con autocompletado básico | 4 |
 | Admin tools | `ps`, `mem`, `cap`, `audit`, `brane` — inspección del sistema | 4 |
-| AI Agents | Runtime IA en sandbox | 5–6 |
+| AI Agents | Runtime IA en sandbox | 14 |
 | Mobile Companion Client | Puente hacia branas compañeras (celulares) | Futuro |
 | Utilities | Herramientas auxiliares del sistema | 4+ |
+
+La baseline no ejecuta todavía esos agentes: `AiEngine` es un singleton ring 0
+con dos observaciones sintéticas de boot. La extracción objetivo separa
+`ai_orchestrator` y `model_runtime`, usa telemetría tipada y deja cada acción
+detrás de policy, broker, lease single-use y executor de dominio. El plan y sus
+gates están en [`AI_RUNTIME.md`](AI_RUNTIME.md) y
+[`ADR-011`](ADR/ADR-011-isolated-ai-runtime.md).
 
 ---
 
@@ -972,6 +1046,11 @@ Ver carpeta [`docs/ADR/`](ADR/) para decisiones formales.
 | [ADR-004](ADR/ADR-004-ipc-message-passing.md) | IPC por message passing acotado | ✅ Baseline v0.1 |
 | [ADR-005](ADR/ADR-005-virtual-memory.md) | Memoria virtual y asignación física | ✅ Baseline v0.1 |
 | [ADR-006](ADR/ADR-006-xhci-event-transfer-model.md) | Modelo de eventos y transferencias xHCI | 📝 Propuesta Fase 13 |
+| [ADR-007](ADR/ADR-007-pci-interrupt-delivery.md) | Entrega MSI/MSI-X y trabajo diferido | 📝 Propuesta Fase 13 |
+| [ADR-008](ADR/ADR-008-syscall-mediation.md) | Mediación de syscalls y memoria de usuario | 📝 Propuesta Fase 14 |
+| [ADR-009](ADR/ADR-009-ipc-endpoints-wait-queues.md) | Endpoints IPC autenticados y wait queues | 📝 Propuesta Fase 14 |
+| [ADR-010](ADR/ADR-010-security-control-plane.md) | Plano de control de seguridad en servicios ring 3 | 📝 Propuesta Fase 14 |
+| [ADR-011](ADR/ADR-011-isolated-ai-runtime.md) | Runtime IA aislado y actuación mediante leases | 📝 Propuesta Fase 14 |
 
 ---
 
@@ -981,11 +1060,15 @@ Ver carpeta [`docs/ADR/`](ADR/) para decisiones formales.
    IN para el teclado conectado en Q35.
 2. Integrar USB mass storage con la block layer y mantener FAT32 read-only como
    primer consumidor.
-3. Definir la matriz syscall → capability → audit event e implementar copia
-   segura de buffers ring 3.
-4. Conectar las syscalls IPC al core, autenticar sender y añadir wait queues.
-5. Extraer policy engine, capability broker, audit service e IA a procesos ring
-   3 conforme a ADR-001.
-6. Completar la matriz de hardware físico y el gate de release v1.0.
+3. Activar MSI-X/MSI para xHCI conservando el dispatcher y fallback polling.
+4. Implementar la matriz syscall → capability → audit event y la copia segura
+   de buffers ring 3 definida en `SYSCALL_SECURITY.md`.
+5. Conectar las syscalls IPC al core con endpoints, sender y wait queues de
+   `IPC_RUNTIME.md`.
+6. Arrancar audit, identity, policy y capability broker como procesos ring 3,
+   con roles bootstrap y fallo cerrado conforme a `SECURITY_SERVICES.md`.
+7. Extraer orchestrator/model de IA a ring 3, primero en `ObserveOnly`, según
+   `AI_RUNTIME.md`.
+8. Completar la matriz de hardware físico y el gate de release v1.0.
 
 El orden ejecutivo y los criterios de salida se mantienen en `ROADMAP.md`.

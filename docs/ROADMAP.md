@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §19.  
 > Estado: **Activo** — se actualiza conforme el proyecto avanza.  
-> Última actualización: **2026-09-09**
+> Última actualización: **2026-09-12**
 
 ---
 
@@ -85,7 +85,7 @@ completada cuando satisface su criterio de salida.
 | Capability Manager | ✅ | 9 permisos (incl. `BRANE_CONNECT`), 4 risk levels, 4 scopes, 256 entries |
 | Audit Hooks | ✅ | 14 event types, ring buffer 512, secuenciación monotónica |
 | Module Loader | ✅ | Hot-swap, 32 módulos, dependency tracking |
-| AI Engine | ✅ | 4 modos (Disabled→ActRestricted), 6 categorías, actuación con audit |
+| AI Engine | ✅ Prototipo | Boot `ObserveOnly` sintético; `ActRestricted` sin capability check |
 | Process Table | ✅ | PCB, 128 procesos, 7 estados, memory map |
 | Unit Tests | ✅ | 35 tests en 9 módulos |
 
@@ -279,7 +279,7 @@ físico se mantiene en la matriz de release de la Fase 11.
 | Componente | Estado | Prioridad | Dependencia |
 |-----------|--------|-----------|-------------|
 | Enumeración PCI/PCIe robusta | ✅ | ALTA | ECAM/MCFG con fallback CF8/CFC, bridges, multifunction, BAR 32/64 y apertures MMIO medidas/mapeadas |
-| MSI/MSI-X | 🔲 | MEDIA | APIC |
+| MSI/MSI-X | 🔲 | MEDIA | Diseño, ownership y fallback definidos en `PCI_INTERRUPTS.md` y ADR-007 |
 | Controlador xHCI | 🔄 | ALTA | Supported Protocol/PORTSC, reset de puerto, slot, contextos y Address Device listos; faltan transferencias USB e interrupciones |
 | USB HID | 🔲 | ALTA | xHCI; teclado y ratón |
 | USB mass storage | 🔲 | MEDIA | xHCI + block layer |
@@ -357,6 +357,13 @@ reutilizará el motor de transferencias para USB Mass Storage Bulk-Only, SCSI
 read-only, registro en la block layer y montaje FAT32. El diseño y sus límites
 están en [`USB_STORAGE.md`](USB_STORAGE.md).
 
+**Décimo corte planificado:** sustituir el busy-wait continuo por entrega
+MSI-X, con fallback MSI y después polling, sin cambiar el consumidor único del
+Event Ring. El primer vector será xHCI en el BSP; afinidad, x2APIC y múltiples
+vectores quedan fuera de la baseline. El plan, rollback y pruebas se definen en
+[`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md) y
+[`ADR-007`](ADR/ADR-007-pci-interrupt-delivery.md).
+
 ---
 
 ## 🔲 Fase 14 — Plataforma y Ecosistema Brane
@@ -366,6 +373,10 @@ aplicaciones y dispositivos Brane.
 
 | Componente | Estado | Prioridad | Dependencia |
 |-----------|--------|-----------|-------------|
+| Mediación syscall y memoria ring 3 | 🔲 | ALTA | Tabla capability/audit, user-copy y retorno seguro definidos en `SYSCALL_SECURITY.md` |
+| IPC autenticado y wait queues | 🔲 | ALTA | Endpoints generacionales, sender kernel y park/notify definidos en `IPC_RUNTIME.md` |
+| Plano de control de seguridad ring 3 | 🔲 | ALTA | Bootstrap audit → identity → policy → broker definido en `SECURITY_SERVICES.md` |
+| Runtime IA aislado | 🔲 | ALTA | `ControlReady`, telemetría tipada, sandbox y leases definidos en `AI_RUNTIME.md` |
 | Package manager (`bpkg`) | 🔲 | ALTA | VFS persistente + firmas |
 | Formato de paquetes y repositorio | 🔲 | ALTA | `bpkg` + capability manifests |
 | Mobile companion bridge | 🔲 | MEDIA | Brane Protocol v2 |
@@ -375,7 +386,26 @@ aplicaciones y dispositivos Brane.
 | SDK y ejemplos | 🔲 | MEDIA | ABI estable y documentación API |
 
 **Criterio de salida:** instalar y verificar un paquete firmado, conectar un
-companion y compartir un recurso bajo control de capabilities y auditoría.
+companion y compartir un recurso bajo control de capabilities y auditoría. Antes
+de esos flujos, los cuatro servicios raíz deben alcanzar `ControlReady` sin que
+`init` conserve la capability amplia del prototipo.
+
+**Prerrequisito de aislamiento:** antes de mover broker, policy, audit o IA a
+servicios, los 28 números de syscall deben tener metadata fail-closed, buffers
+ring 3 copiados de forma segura, scopes aplicados en el dispatcher y resultados
+auditados. La secuencia y la evidencia requerida están en
+[`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md) y
+[`ADR-008`](ADR/ADR-008-syscall-mediation.md). Después, `Send`/`Recv` deben
+transportar mensajes reales entre procesos mediante los endpoints y wait queues
+de [`IPC_RUNTIME.md`](IPC_RUNTIME.md) y
+[`ADR-009`](ADR/ADR-009-ipc-endpoints-wait-queues.md). Finalmente, audit,
+identity, policy y broker deben alcanzar `ControlReady` con roles no
+transferibles, commit kernel y fallos cerrados según
+[`SECURITY_SERVICES.md`](SECURITY_SERVICES.md) y
+[`ADR-010`](ADR/ADR-010-security-control-plane.md). IA arranca después como
+cliente no privilegiado, primero en `ObserveOnly`, siguiendo
+[`AI_RUNTIME.md`](AI_RUNTIME.md) y
+[`ADR-011`](ADR/ADR-011-isolated-ai-runtime.md).
 
 ---
 

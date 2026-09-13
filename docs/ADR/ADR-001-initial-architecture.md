@@ -70,3 +70,5 @@ Se adopta **Rust** como lenguaje principal por:
 
 - `docs/PROJECT_MASTER_SPEC.md` §8 (Tipo de arquitectura)
 - `docs/ARCHITECTURE.md`
+- [`ADR-010`](ADR-010-security-control-plane.md) concreta la extracción del
+  plano de control de seguridad a servicios ring 3.

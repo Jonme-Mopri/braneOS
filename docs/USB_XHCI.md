@@ -2,7 +2,7 @@
 
 > Fase: **13 — Hardware I/O y almacenamiento**.
 > Estado: **diseño del octavo corte; implementación pendiente**.
-> Última actualización: **2026-09-09**.
+> Última actualización: **2026-09-12**.
 
 ## 1. Objetivo
 
@@ -71,7 +71,9 @@ La prueba `make pcie-test` conecta `qemu-xhci` y `usb-kbd`, y exige:
 - Mouse, hubs, interfaces compuestas arbitrarias y múltiples teclados.
 - Parser genérico del HID Report Descriptor.
 - SuperSpeed HID, streams, isochronous y USB power management.
-- MSI/MSI-X, hotplug, suspend/resume USB y cancelación avanzada.
+- MSI/MSI-X (corte posterior en
+  [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md)), hotplug, suspend/resume USB y
+  cancelación avanzada.
 - USB mass storage; reutilizará el transfer engine en un corte posterior.
 
 ## 4. Estructuras nuevas
@@ -324,6 +326,7 @@ El octavo corte se considera terminado cuando:
 - [USB-IF Device Class Definition for HID 1.11](https://www.usb.org/sites/default/files/hid1_11.pdf)
 - [USB-IF USB 2.0 document set](https://www.usb.org/documents?search=usb+2.0)
 - [`ADR-006`: modelo de eventos y transferencias](ADR/ADR-006-xhci-event-transfer-model.md)
+- [`PCI_INTERRUPTS.md`: transición MSI/MSI-X](PCI_INTERRUPTS.md)
 
 Las especificaciones normativas prevalecen sobre este plan si existe una
 discrepancia de campos, tiempos o semántica de protocolo.

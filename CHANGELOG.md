@@ -15,6 +15,16 @@ All notable changes to Brane OS are documented here. The project follows
   bounded polling, explicit DMA ownership and completion correlation.
 - Phase 13 follow-up specification for read-only USB Mass Storage using
   Bulk-Only Transport, a minimal SCSI profile and the existing block/FAT32 path.
+- Phase 13 MSI/MSI-X specification and ADR covering PCI capability walking,
+  vector ownership, transactional programming, deferred work and polling fallback.
+- Phase 14 prerequisite specification and ADR for centralized syscall mediation,
+  user-memory copying, capability policy, auditing and safe ring-3 return.
+- Phase 14 IPC runtime specification and ADR for authenticated endpoint handles,
+  service discovery, blocking wait cells, cancellation and RPC correlation.
+- Phase 14 security-services specification and ADR for bootstrap roles, ordered
+  identity/policy/broker startup, capability commit and auditable failure modes.
+- Phase 14 isolated AI runtime specification and ADR for typed telemetry,
+  sandboxed inference, per-action gates and single-use execution leases.
 - Portable UEFI ISO packaging with BIOS and UEFI disk artifacts.
 - Automated ISO boot verification with QEMU, OVMF and TCG.
 - Tag-driven GitHub release workflow with SHA-256 verification.
