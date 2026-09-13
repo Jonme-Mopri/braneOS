@@ -15,6 +15,7 @@ una descripción de diseño no implica por sí sola que exista código ejecutabl
 | IPC entre procesos | 🟡 Colas kernel probadas en host | Endpoints, sender autenticado y wait queues |
 | Seguridad y auditoría | 🟡 Baseline en kernel | Cuatro servicios raíz y bootstrap fail-closed |
 | IA | 🟡 ObserveOnly sintético en kernel | Runtime/modelo aislados y telemetría real |
+| Paquetes | 🔲 Diseño `bpkg` | Storage durable, trust root y trusted time |
 | SMP/APIC | ✅ 4 vCPU en QEMU/TCG | Validación física |
 | Almacenamiento | ✅ virtio-blk + FAT32 read-only | USB mass storage y escritura persistente |
 | USB/xHCI | 🟡 Dispositivo direccionado | Control transfers, HID interrupt IN |
@@ -43,6 +44,7 @@ se mantienen en [`ROADMAP.md`](ROADMAP.md).
 | Separar identity, policy, broker y audit | [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md) |
 | Revisar el subsistema IA | [`AI_SUBSYSTEM.md`](AI_SUBSYSTEM.md) |
 | Extraer y aislar el runtime IA | [`AI_RUNTIME.md`](AI_RUNTIME.md) |
+| Diseñar paquetes, repositorio e instalación | [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) |
 | Implementar el siguiente corte USB HID | [`USB_XHCI.md`](USB_XHCI.md) |
 | Preparar USB Mass Storage sobre xHCI | [`USB_STORAGE.md`](USB_STORAGE.md) |
 | Migrar drivers PCI de polling a MSI/MSI-X | [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md) |

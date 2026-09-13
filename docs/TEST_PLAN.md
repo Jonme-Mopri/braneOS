@@ -244,6 +244,9 @@ La validación local equivalente recomendada está documentada en
 23. Fase 14: orchestrator/model IA en procesos separados, telemetría tipada,
     budgets, provenance y primera acción con lease single-use; especificación en
     [`AI_RUNTIME.md`](AI_RUNTIME.md).
+24. Fase 14: parser `.bpkg`, cadena de metadata, resolver, store inmutable y
+    crash recovery de generations; especificación en
+    [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md).
 
 ## 7. Make targets disponibles
 

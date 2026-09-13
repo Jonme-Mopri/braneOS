@@ -71,6 +71,7 @@ Start with the [documentation index](docs/README.md). Key references are the
 [IPC runtime plan](docs/IPC_RUNTIME.md),
 [security services plan](docs/SECURITY_SERVICES.md),
 [isolated AI runtime plan](docs/AI_RUNTIME.md),
+[package manager plan](docs/PACKAGE_MANAGER.md),
 [architecture decisions](docs/ADR/README.md), and [changelog](CHANGELOG.md).
 
 ---

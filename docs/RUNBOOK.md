@@ -286,6 +286,11 @@ observaciones de boot son sintéticas. No prueba telemetría, inferencia, sandbo
 ni actuación mediada. La extracción `ObserveOnly → Suggest → ActRestricted` y
 sus leases se especifican en [`AI_RUNTIME.md`](AI_RUNTIME.md) y
 [`ADR-011`](ADR/ADR-011-isolated-ai-runtime.md).
+Tampoco existe `bpkg`: el checksum de la ISO no es una firma de paquete y VFS
+carece de storage durable/atómico. No use RamFS o FAT32 read-only como evidencia
+de instalación. Formato, trust, trusted time y crash recovery se definen en
+[`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) y
+[`ADR-012`](ADR/ADR-012-signed-packages-transactional-activation.md).
 
 ---
 

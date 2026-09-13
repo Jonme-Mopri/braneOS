@@ -393,6 +393,11 @@ servicios raíz. Topología, schemas, budgets y leases se especifican en
 [`AI_RUNTIME.md`](AI_RUNTIME.md) y
 [`ADR-011`](ADR/ADR-011-isolated-ai-runtime.md).
 
+`package_manager` también es un cliente posterior a `ControlReady`: puede pedir
+grants acotados para un plan/digest exacto, pero no recibe autoridad root,
+targets, policy o broker. Sus manifests sólo declaran requirements; ver
+[`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md).
+
 ## 11. Locks, ownership y límites
 
 ```text
@@ -496,5 +501,6 @@ raíces criptográficas y de storage.
 - [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md)
 - [`IPC_RUNTIME.md`](IPC_RUNTIME.md)
 - [`AI_RUNTIME.md`](AI_RUNTIME.md)
+- [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md)
 - [`SECURITY_MODEL.md`](SECURITY_MODEL.md)
 - [`AI_SUBSYSTEM.md`](AI_SUBSYSTEM.md)

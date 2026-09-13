@@ -175,3 +175,4 @@ La decisión puede marcarse aceptada cuando:
 - [`ADR-008`](ADR-008-syscall-mediation.md)
 - [`ADR-009`](ADR-009-ipc-endpoints-wait-queues.md)
 - [`ADR-011`](ADR-011-isolated-ai-runtime.md)
+- [`ADR-012`](ADR-012-signed-packages-transactional-activation.md)

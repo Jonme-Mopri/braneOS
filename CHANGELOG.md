@@ -25,6 +25,8 @@ All notable changes to Brane OS are documented here. The project follows
   identity/policy/broker startup, capability commit and auditable failure modes.
 - Phase 14 isolated AI runtime specification and ADR for typed telemetry,
   sandboxed inference, per-action gates and single-use execution leases.
+- Phase 14 `bpkg` specification and ADR for deterministic signed packages,
+  TUF-style repository roles, immutable storage and transactional activation.
 - Portable UEFI ISO packaging with BIOS and UEFI disk artifacts.
 - Automated ISO boot verification with QEMU, OVMF and TCG.
 - Tag-driven GitHub release workflow with SHA-256 verification.

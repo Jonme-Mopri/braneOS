@@ -173,4 +173,4 @@ La decisión puede marcarse aceptada cuando:
 - [`ADR-008`](ADR-008-syscall-mediation.md)
 - [`ADR-009`](ADR-009-ipc-endpoints-wait-queues.md)
 - [`ADR-010`](ADR-010-security-control-plane.md)
-
+- [`ADR-012`](ADR-012-signed-packages-transactional-activation.md)

@@ -20,6 +20,7 @@ completa:
   existen aún como servicios aislados en ring 3;
 - el boot concede directamente a la tarea 1 una capability de sistema amplia;
 - las capacidades y el audit log son volátiles;
+- no existe package verifier, trust root, trusted time ni storage transaccional;
 - las pruebas QEMU de seguridad validan invariantes de boot, mientras que las
   denegaciones detalladas se ejercitan principalmente en unit tests host.
 
@@ -169,6 +170,7 @@ un ADR antes de exponer capacidades entre máquinas.
 | Evento borrado por saturación | Ring acotado sin corrupción | Pérdida del evento antiguo |
 | Input de disco/red/firmware hostil | Parsers validados, límites y fuzz determinista | Cobertura no equivale a prueba formal |
 | Salida IA hostil | Acciones restringidas por enum | Sandbox, schemas y leases de `AI_RUNTIME.md` pendientes |
+| Paquete/repositorio comprometido | Release local produce checksum SHA-256 | Sin firmas, roles, freshness ni commit durable de `PACKAGE_MANAGER.md` |
 | Dispositivo DMA malicioso | Buffers contiguos y rangos controlados | Sin IOMMU |
 | Peer Brane falso/replay | Sesión X25519 + AEAD y nonce | Identidad persistente/PKI pendiente |
 | Exposición por logs | Serial facilita diagnóstico temprano | La sesión imprime parte del secreto X25519 |
@@ -207,4 +209,6 @@ Los criterios específicos de la frontera syscall se mantienen en
 6. Persistir el audit log con cursor, gaps, integridad y política de saturación.
 7. Extraer IA en `ObserveOnly` y habilitar acciones sólo con los gates de
    [`AI_RUNTIME.md`](AI_RUNTIME.md).
-8. Diseñar aislamiento DMA/IOMMU y raíces de confianza para peers Brane.
+8. Implementar storage/trusted time y la cadena de instalación de
+   [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md).
+9. Diseñar aislamiento DMA/IOMMU y raíces de confianza para peers Brane.

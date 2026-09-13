@@ -287,7 +287,9 @@ pub struct ModelManifestV1 {
 
 Hasta implementar carga de paquetes firmados, sólo se acepta el modelo built-in
 cuya medición está en el manifest de boot. Un hash identifica bytes; por sí solo
-no prueba quién los autorizó.
+no prueba quién los autorizó. La distribución futura se somete al trust y
+activation de [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md), sin conceder al modelo
+las capabilities declaradas por el paquete.
 
 ### 8.2 Contención
 
@@ -543,7 +545,7 @@ la actuación es otro gate de seguridad.
 - [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md)
 - [`IPC_RUNTIME.md`](IPC_RUNTIME.md)
 - [`SECURITY_MODEL.md`](SECURITY_MODEL.md)
+- [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md)
 - [`ADR-001`: arquitectura híbrida modular](ADR/ADR-001-initial-architecture.md)
 - [`ADR-010`: plano de control de seguridad](ADR/ADR-010-security-control-plane.md)
 - [`ADR-011`: runtime de IA aislado](ADR/ADR-011-isolated-ai-runtime.md)
-

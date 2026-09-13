@@ -58,3 +58,15 @@ qemu-system-x86_64 \
 
 Manual `workflow_dispatch` runs validate and upload workflow artifacts but do
 not publish a GitHub Release.
+
+## OS images versus `bpkg`
+
+This workflow publishes whole-system boot artifacts. The `.sha256` file detects
+accidental or out-of-band changes only when the checksum itself comes from a
+trusted channel; it is not a package signature, repository trust root or update
+freshness proof.
+
+The future `bpkg` path uses a separate deterministic package format, repository
+roles, trusted-time policy and transactional generations. Node/Brane identity
+keys are not release keys. See [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) and
+[`ADR-012`](ADR/ADR-012-signed-packages-transactional-activation.md).

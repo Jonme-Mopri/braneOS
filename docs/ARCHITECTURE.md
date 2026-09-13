@@ -675,6 +675,7 @@ persistencia ejecutan decisiones separadas en ring 3.
 | `process_manager` | Gestión del ciclo de vida de procesos | Kernel, IPC | 4 |
 | `filesystem_service` | VFS y acceso a archivos | Kernel, Drivers | 4 |
 | `device_manager` | Hot-plug y gestión de dispositivos | Kernel, Drivers | 4 |
+| `package_manager` | Verificar, resolver y activar packages | VFS persistente, Network, Control Plane | 14 |
 | `policy_engine` | Evaluación de reglas de política | Identity, IPC, Audit | 14 |
 | `audit_service` | Persistencia y consulta de audit logs | IPC, Audit Hooks | 14 |
 | `capability_broker` | Mediador de acceso para acciones privilegiadas | Identity, Policy, Cap Manager | 14 |
@@ -694,9 +695,10 @@ init
  ├──▶ process_manager       (5°, gestión de procesos)
  ├──▶ device_manager        (6°, hardware)
  ├──▶ filesystem_service    (7°, archivos)
- ├──▶ network_manager       (8°, red)
- ├──▶ ai_orchestrator       (9°, IA)
- ├──▶ brane_connector       (10°, interconexión)
+ ├──▶ network_manager       (8°, red y trusted-time transport)
+ ├──▶ package_manager       (9°, tras storage/trust/time)
+ ├──▶ ai_orchestrator       (10°, IA)
+ ├──▶ brane_connector       (11°, interconexión)
  └──▶ shell                 (último, interfaz de usuario)
 ```
 
@@ -879,7 +881,7 @@ ruta completa VFS → FAT32 → block layer → virtio-blk → DMA.
 | Componente | Descripción | Fase |
 |-----------|-------------|------|
 | Shell mínima | Interfaz de comandos con autocompletado básico | 4 |
-| Admin tools | `ps`, `mem`, `cap`, `audit`, `brane` — inspección del sistema | 4 |
+| Admin tools | `ps`, `mem`, `cap`, `audit`, `brane`, `bpkg` | 4/14 |
 | AI Agents | Runtime IA en sandbox | 14 |
 | Mobile Companion Client | Puente hacia branas compañeras (celulares) | Futuro |
 | Utilities | Herramientas auxiliares del sistema | 4+ |
@@ -890,6 +892,12 @@ con dos observaciones sintéticas de boot. La extracción objetivo separa
 detrás de policy, broker, lease single-use y executor de dominio. El plan y sus
 gates están en [`AI_RUNTIME.md`](AI_RUNTIME.md) y
 [`ADR-011`](ADR/ADR-011-isolated-ai-runtime.md).
+
+`bpkg` tampoco existe en la baseline. El package manager objetivo separa
+download de verificación, usa un store inmutable y activa generations completas
+después de policy. Requiere filesystem persistente, trusted time y metadata de
+repositorio verificable; ver [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) y
+[`ADR-012`](ADR/ADR-012-signed-packages-transactional-activation.md).
 
 ---
 
@@ -1051,6 +1059,7 @@ Ver carpeta [`docs/ADR/`](ADR/) para decisiones formales.
 | [ADR-009](ADR/ADR-009-ipc-endpoints-wait-queues.md) | Endpoints IPC autenticados y wait queues | 📝 Propuesta Fase 14 |
 | [ADR-010](ADR/ADR-010-security-control-plane.md) | Plano de control de seguridad en servicios ring 3 | 📝 Propuesta Fase 14 |
 | [ADR-011](ADR/ADR-011-isolated-ai-runtime.md) | Runtime IA aislado y actuación mediante leases | 📝 Propuesta Fase 14 |
+| [ADR-012](ADR/ADR-012-signed-packages-transactional-activation.md) | Paquetes firmados y activación transaccional | 📝 Propuesta Fase 14 |
 
 ---
 
@@ -1069,6 +1078,8 @@ Ver carpeta [`docs/ADR/`](ADR/) para decisiones formales.
    con roles bootstrap y fallo cerrado conforme a `SECURITY_SERVICES.md`.
 7. Extraer orchestrator/model de IA a ring 3, primero en `ObserveOnly`, según
    `AI_RUNTIME.md`.
-8. Completar la matriz de hardware físico y el gate de release v1.0.
+8. Añadir storage durable/trusted time e implementar `.bpkg`, metadata y
+   activation transaccional según `PACKAGE_MANAGER.md`.
+9. Completar la matriz de hardware físico y el gate de release v1.0.
 
 El orden ejecutivo y los criterios de salida se mantienen en `ROADMAP.md`.

@@ -377,8 +377,8 @@ aplicaciones y dispositivos Brane.
 | IPC autenticado y wait queues | 🔲 | ALTA | Endpoints generacionales, sender kernel y park/notify definidos en `IPC_RUNTIME.md` |
 | Plano de control de seguridad ring 3 | 🔲 | ALTA | Bootstrap audit → identity → policy → broker definido en `SECURITY_SERVICES.md` |
 | Runtime IA aislado | 🔲 | ALTA | `ControlReady`, telemetría tipada, sandbox y leases definidos en `AI_RUNTIME.md` |
-| Package manager (`bpkg`) | 🔲 | ALTA | VFS persistente + firmas |
-| Formato de paquetes y repositorio | 🔲 | ALTA | `bpkg` + capability manifests |
+| Package manager (`bpkg`) | 🔲 | ALTA | Storage durable, generations y recovery definidos en `PACKAGE_MANAGER.md` |
+| Formato de paquetes y repositorio | 🔲 | ALTA | `.bpkg`, roles TUF, trust y trusted time definidos en `PACKAGE_MANAGER.md` |
 | Mobile companion bridge | 🔲 | MEDIA | Brane Protocol v2 |
 | Brane resource sharing | 🔲 | MEDIA | Sesiones cifradas + políticas |
 | IoT lightweight protocol | 🔲 | MEDIA | Transporte Brane reducido |
@@ -405,7 +405,10 @@ transferibles, commit kernel y fallos cerrados según
 [`ADR-010`](ADR/ADR-010-security-control-plane.md). IA arranca después como
 cliente no privilegiado, primero en `ObserveOnly`, siguiendo
 [`AI_RUNTIME.md`](AI_RUNTIME.md) y
-[`ADR-011`](ADR/ADR-011-isolated-ai-runtime.md).
+[`ADR-011`](ADR/ADR-011-isolated-ai-runtime.md). La instalación de software
+requiere después persistencia durable, trusted time, metadata y commit por
+generation conforme a [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) y
+[`ADR-012`](ADR/ADR-012-signed-packages-transactional-activation.md).
 
 ---
 

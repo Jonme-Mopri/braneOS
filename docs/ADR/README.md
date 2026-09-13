@@ -18,6 +18,7 @@ y condiciones de revisión.
 | [ADR-009](ADR-009-ipc-endpoints-wait-queues.md) | Endpoints IPC autenticados y wait queues | Propuesta para Fase 14 |
 | [ADR-010](ADR-010-security-control-plane.md) | Plano de control de seguridad en servicios ring 3 | Propuesta para Fase 14 |
 | [ADR-011](ADR-011-isolated-ai-runtime.md) | Runtime IA aislado y actuación mediante leases | Propuesta para Fase 14 |
+| [ADR-012](ADR-012-signed-packages-transactional-activation.md) | Paquetes firmados y activación transaccional | Propuesta para Fase 14 |
 
 ## Estados
 

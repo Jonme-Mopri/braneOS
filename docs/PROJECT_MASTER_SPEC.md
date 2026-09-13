@@ -10,7 +10,8 @@ arquitectura objetivo e implementación actual en
 [`ARCHITECTURE.md`](ARCHITECTURE.md), [`SECURITY_MODEL.md`](SECURITY_MODEL.md) y
 [`AI_SUBSYSTEM.md`](AI_SUBSYSTEM.md). La extracción del plano de control se
 detalla en [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md), y el runtime IA ring
-3 en [`AI_RUNTIME.md`](AI_RUNTIME.md).
+3 en [`AI_RUNTIME.md`](AI_RUNTIME.md). El formato y flujo de instalación se
+definen en [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md).
 
 ## 1. Identidad del proyecto
 
@@ -257,6 +258,7 @@ Servicios esperados:
 - `capability_broker`
 - `audit_service`
 - `ai_orchestrator`
+- `package_manager`
 
 ---
 
@@ -552,6 +554,7 @@ brane_os/
     IPC_RUNTIME.md
     SECURITY_SERVICES.md
     AI_RUNTIME.md
+    PACKAGE_MANAGER.md
     RUNBOOK.md
     RELEASE.md
     HARDWARE_MATRIX.md
@@ -580,6 +583,7 @@ brane_os/
     capability_broker/
     audit_service/
     ai_orchestrator/
+    package_manager/       # objetivo Fase 14; directorio aún no creado
 
   drivers/
     serial/
@@ -764,7 +768,7 @@ A partir de este documento se deberán crear y mantener:
 - [x] `TEST_PLAN.md`
 - [x] `ROADMAP.md`
 - [x] `ADR/ADR-001-*.md`
-- [x] `ADR/ADR-002-*.md` a `ADR/ADR-011-*.md`
+- [x] `ADR/ADR-002-*.md` a `ADR/ADR-012-*.md`
 - [x] `README.md` (índice documental)
 - [x] `RUNBOOK.md`
 - [x] `RELEASE.md`
@@ -776,6 +780,7 @@ A partir de este documento se deberán crear y mantener:
 - [x] `IPC_RUNTIME.md` (endpoints y wait queues de servicios de la Fase 14)
 - [x] `SECURITY_SERVICES.md` (bootstrap y plano de control de la Fase 14)
 - [x] `AI_RUNTIME.md` (aislamiento, telemetría y actuación IA de la Fase 14)
+- [x] `PACKAGE_MANAGER.md` (paquetes, repositorio y activación de la Fase 14)
 
 ---
 
@@ -792,6 +797,7 @@ A partir de este documento se deberán crear y mantener:
 | Policy store | 🔲 Diseño | `SECURITY_SERVICES.md` define policy bootstrap/persistente; servicio aún inexistente |
 | Plano de control de seguridad | 🔲 Propuesta | ADR-010 define roles audit → identity → policy → broker y commit kernel |
 | Runtime IA | 🟡 Prototipo | `ai.rs` observa strings sintéticos en kernel; ADR-011 define migración y leases pendientes |
+| Package manager | 🔲 Propuesta | ADR-012 define `.bpkg`, roles TUF, store inmutable y activation transaccional |
 | Persistencia | 🟡 Parcial | Lectura FAT32 real; escrituras, journal y política de montaje pendientes |
 | Eventos xHCI | 🔲 Propuesta | ADR-006 define despachador único, correlación y polling acotado para completar USB HID |
 | Interrupciones PCI | 🔲 Propuesta | ADR-007 y `PCI_INTERRUPTS.md` definen MSI-X → MSI → polling, vectores fijos y trabajo diferido |
