@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §19.  
 > Estado: **Activo** — se actualiza conforme el proyecto avanza.  
-> Última actualización: **2026-09-12**
+> Última actualización: **2026-09-15**
 
 ---
 
@@ -18,10 +18,10 @@
  ─────────────────────────────────────────────────────┼─────────────────────────────────────────────────▶
 ```
 
-**Foco actual:** Fase 13 — completar transferencias de control USB, leer los
-descriptores del teclado HID y habilitar su endpoint de interrupción. La
-secuencia, invariantes y pruebas están definidas en
-[`USB_XHCI.md`](USB_XHCI.md).
+**Foco actual:** Fase 13 — reutilizar el motor de transferencias xHCI para USB
+Mass Storage Bulk-Only, SCSI read-only, registro en la block layer y montaje
+FAT32. La secuencia, invariantes y pruebas están definidas en
+[`USB_STORAGE.md`](USB_STORAGE.md).
 
 ### Disciplina de cambios por fase
 
@@ -280,8 +280,8 @@ físico se mantiene en la matriz de release de la Fase 11.
 |-----------|--------|-----------|-------------|
 | Enumeración PCI/PCIe robusta | ✅ | ALTA | ECAM/MCFG con fallback CF8/CFC, bridges, multifunction, BAR 32/64 y apertures MMIO medidas/mapeadas |
 | MSI/MSI-X | 🔲 | MEDIA | Diseño, ownership y fallback definidos en `PCI_INTERRUPTS.md` y ADR-007 |
-| Controlador xHCI | 🔄 | ALTA | Supported Protocol/PORTSC, reset de puerto, slot, contextos y Address Device listos; faltan transferencias USB e interrupciones |
-| USB HID | 🔲 | ALTA | xHCI; teclado y ratón |
+| Controlador xHCI | 🔄 | ALTA | Transferencias de control/interrupt IN y dispatcher listos; faltan storage, MSI/MSI-X y hotplug |
+| USB HID | ✅ | ALTA | Teclado boot protocol → TTY en Q35 con 1/4 vCPU; ratón fuera de la baseline |
 | USB mass storage | 🔲 | MEDIA | xHCI + block layer |
 | Block layer | ✅ | ALTA | Trait, registry, validación I/O y primer backend real |
 | DMA + virtio-blk legacy | ✅ | ALTA | Frames contiguos <4 GiB, virtqueue y lectura sectorial en QEMU |
@@ -351,11 +351,20 @@ y `Device addressed: slot=1`; QEMU lo enumeró en el puerto 5 a high speed. El
 siguiente corte implementará transferencias de control y descriptores USB/HID
 según [`USB_XHCI.md`](USB_XHCI.md).
 
-**Octavo corte planificado:** completar el teclado HID desde EP0 hasta reportes
-interrupt IN. Después de satisfacer su criterio de salida, el **noveno corte**
-reutilizará el motor de transferencias para USB Mass Storage Bulk-Only, SCSI
-read-only, registro en la block layer y montaje FAT32. El diseño y sus límites
-están en [`USB_STORAGE.md`](USB_STORAGE.md).
+**Octavo corte completado:** un dispatcher único clasifica Command Completion,
+Transfer y Port Status Change Events sin perder completions intercaladas. EP0
+publica Setup/Data/Status TRB, valida Device/Configuration/Interface/Endpoint
+descriptors y completa `SET_CONFIGURATION` y HID `SET_PROTOCOL(BOOT)`. El
+kernel configura el endpoint interrupt IN anunciado, rearma un único reporte
+DMA de ocho bytes y traduce nuevas pulsaciones US a la TTY fuera del lock xHCI.
+`make usb-hid-test` inyecta `u` por QMP y exige el marcador del Transfer Event
+en Q35 con 1 y 4 vCPU; 165 tests host cubren TRB, ring, correlación, parsers y
+decoder, incluidos los parsers USB en mutation-fuzz. `make test-all` conserva
+además boot legacy, SMP, ACPI S3, security, integration y E2E.
+
+**Noveno corte planificado:** reutilizar el motor de transferencias para USB
+Mass Storage Bulk-Only, SCSI read-only, registro en la block layer y montaje
+FAT32. El diseño y sus límites están en [`USB_STORAGE.md`](USB_STORAGE.md).
 
 **Décimo corte planificado:** sustituir el busy-wait continuo por entrega
 MSI-X, con fallback MSI y después polling, sin cambiar el consumidor único del
@@ -418,11 +427,11 @@ generation conforme a [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) y
 |---------|-------|
 | **Módulos del kernel** | 39 archivos de módulo (excluye `lib.rs`, `main.rs`, `tests.rs`) |
 | **Líneas de código (Rust)** | ~18,000 |
-| **Unit tests** | 157 (incluye xHCI, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
+| **Unit tests** | 165 (incluye xHCI USB/HID, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
 | **Syscalls definidas** | 28 (incluye Kill, SigAction, SigReturn, SigProcMask) |
 | **Harnesses de test Python** | 8 (boot + ACPI S3 + 2 security + 2 integration + 2 e2e) |
-| **CI checks** | 12 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, ACPI S3, security, integration, E2E) |
-| **Make targets de test** | 11 (test, stress-test, iso-test, release-test, boot-test, pcie-test, smp-test, acpi-test, security-test, integration-test, e2e-test) |
+| **CI checks** | 13 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, USB HID, ACPI S3, security, integration, E2E) |
+| **Make targets de test** | 12 (test, stress-test, iso-test, release-test, boot-test, pcie-test, usb-hid-test, smp-test, acpi-test, security-test, integration-test, e2e-test) |
 | **Fases completadas** | 11 fases completadas (1–10 y 12); Fase 11 espera gate físico/release |
 
 ---

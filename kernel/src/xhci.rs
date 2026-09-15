@@ -1,10 +1,11 @@
-//! xHCI discovery, reset and initial runtime structures.
+//! xHCI discovery, polling transfers and USB HID boot-keyboard support.
 //!
 //! The controller is brought to the Running state with a Device Context Base
 //! Address Array, Command Ring and one polling Event Ring. Supported Protocol
 //! capabilities and root ports are inspected, and the first connected device
-//! is reset, assigned a slot and addressed through its default control pipe.
-//! HID transfers and MSI/MSI-X are intentionally left to the next increments.
+//! is enumerated through its default control pipe. A HID boot-keyboard endpoint
+//! is configured and kept armed through bounded polling. MSI/MSI-X remains a
+//! later Phase 13 increment.
 
 #![allow(dead_code)]
 
@@ -64,25 +65,60 @@ const PORTSC_CHANGE_BITS: u32 = 0x7F << 17;
 const PORTSC_WARM_PORT_RESET: u32 = 1 << 31;
 
 const TRB_TYPE_LINK: u32 = 6;
+const TRB_TYPE_NORMAL: u32 = 1;
+const TRB_TYPE_SETUP_STAGE: u32 = 2;
+const TRB_TYPE_DATA_STAGE: u32 = 3;
+const TRB_TYPE_STATUS_STAGE: u32 = 4;
 const TRB_TYPE_ENABLE_SLOT_COMMAND: u32 = 9;
 const TRB_TYPE_ADDRESS_DEVICE_COMMAND: u32 = 11;
+const TRB_TYPE_CONFIGURE_ENDPOINT_COMMAND: u32 = 12;
 const TRB_TYPE_NO_OP_COMMAND: u32 = 23;
+const TRB_TYPE_TRANSFER_EVENT: u32 = 32;
 const TRB_TYPE_COMMAND_COMPLETION_EVENT: u32 = 33;
+const TRB_TYPE_PORT_STATUS_CHANGE_EVENT: u32 = 34;
 const TRB_CYCLE: u32 = 1 << 0;
+const TRB_INTERRUPT_ON_SHORT_PACKET: u32 = 1 << 2;
+const TRB_CHAIN: u32 = 1 << 4;
+const TRB_INTERRUPT_ON_COMPLETION: u32 = 1 << 5;
+const TRB_IMMEDIATE_DATA: u32 = 1 << 6;
 const LINK_TRB_TOGGLE_CYCLE: u32 = 1 << 1;
 const TRB_TYPE_SHIFT: u32 = 10;
 const TRB_TYPE_MASK: u32 = 0x3F;
+const TRB_DIRECTION_IN: u32 = 1 << 16;
+const SETUP_TRANSFER_TYPE_SHIFT: u32 = 16;
+const SETUP_TRANSFER_TYPE_NO_DATA: u32 = 0;
+const SETUP_TRANSFER_TYPE_OUT: u32 = 2;
+const SETUP_TRANSFER_TYPE_IN: u32 = 3;
 const COMPLETION_CODE_SUCCESS: u8 = 1;
+const COMPLETION_CODE_SHORT_PACKET: u8 = 13;
 const EVENT_HANDLER_BUSY: u64 = 1 << 3;
 const COMMAND_RING_TRBS: usize = FRAME_SIZE / core::mem::size_of::<Trb>();
 const COMMAND_RING_USABLE_TRBS: usize = COMMAND_RING_TRBS - 1;
 const EVENT_RING_TRBS: usize = FRAME_SIZE / core::mem::size_of::<Trb>();
 const MAX_POLL_SPINS: usize = 10_000_000;
+const RUNTIME_EVENT_BUDGET: usize = 16;
 const EXTENDED_CAPABILITY_SUPPORTED_PROTOCOL: u8 = 2;
 const SUPPORTED_PROTOCOL_NAME_USB: u32 = 0x2042_5355;
 const MAX_SUPPORTED_PROTOCOLS: usize = 8;
 const CONTEXTS_PER_DEVICE: usize = 32;
 const INPUT_CONTEXTS_PER_DEVICE: usize = CONTEXTS_PER_DEVICE + 1;
+const USB_DESCRIPTOR_DEVICE: u8 = 1;
+const USB_DESCRIPTOR_CONFIGURATION: u8 = 2;
+const USB_DESCRIPTOR_INTERFACE: u8 = 4;
+const USB_DESCRIPTOR_ENDPOINT: u8 = 5;
+const USB_REQUEST_GET_DESCRIPTOR: u8 = 6;
+const USB_REQUEST_SET_CONFIGURATION: u8 = 9;
+const HID_REQUEST_SET_PROTOCOL: u8 = 0x0B;
+const USB_REQUEST_TYPE_DEVICE_IN: u8 = 0x80;
+const USB_REQUEST_TYPE_DEVICE_OUT: u8 = 0x00;
+const USB_REQUEST_TYPE_HID_INTERFACE_OUT: u8 = 0x21;
+const USB_CLASS_HID: u8 = 0x03;
+const HID_SUBCLASS_BOOT: u8 = 0x01;
+const HID_PROTOCOL_KEYBOARD: u8 = 0x01;
+const USB_ENDPOINT_DIRECTION_IN: u8 = 0x80;
+const USB_ENDPOINT_TRANSFER_TYPE_MASK: u8 = 0x03;
+const USB_ENDPOINT_TRANSFER_INTERRUPT: u8 = 0x03;
+const HID_BOOT_REPORT_BYTES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct XhciControllerInfo {
@@ -103,6 +139,15 @@ pub struct XhciControllerInfo {
     pub addressed_port: u8,
     pub addressed_slot: u8,
     pub addressed_speed_id: u8,
+    pub device_vendor_id: u16,
+    pub device_product_id: u16,
+    pub device_configurations: u8,
+    pub hid_keyboard_ready: bool,
+    pub hid_interface: u8,
+    pub hid_endpoint_address: u8,
+    pub hid_endpoint_dci: u8,
+    pub hid_max_packet_size: u16,
+    pub hid_interval: u8,
     pub command_probe_completed: bool,
     pub running: bool,
 }
@@ -126,6 +171,15 @@ pub enum XhciInitError {
     CommandCompletionTimeout,
     InvalidCommandCompletion,
     CommandFailed(u8),
+    Busy,
+    RingFull,
+    TransferTimeout,
+    InvalidTransferCompletion,
+    TransferFailed(u8),
+    InvalidDescriptor,
+    DescriptorTooLarge,
+    HidKeyboardNotFound,
+    InvalidHidReport,
     InvalidExtendedCapability,
     PortResetTimeout,
     PortNotEnabled,
@@ -237,6 +291,70 @@ impl Trb {
         }
     }
 
+    const fn configure_endpoint_command(input_context: u64, slot_id: u8) -> Self {
+        Self {
+            parameter: input_context,
+            status: 0,
+            control: (TRB_TYPE_CONFIGURE_ENDPOINT_COMMAND << TRB_TYPE_SHIFT)
+                | ((slot_id as u32) << 24),
+        }
+    }
+
+    fn setup_stage(packet: UsbSetupPacket, direction: TransferDirection) -> Self {
+        let transfer_type = match direction {
+            TransferDirection::None => SETUP_TRANSFER_TYPE_NO_DATA,
+            TransferDirection::Out => SETUP_TRANSFER_TYPE_OUT,
+            TransferDirection::In => SETUP_TRANSFER_TYPE_IN,
+        };
+        Self {
+            parameter: u64::from_le_bytes(packet.to_bytes()),
+            status: 8,
+            control: (TRB_TYPE_SETUP_STAGE << TRB_TYPE_SHIFT)
+                | TRB_IMMEDIATE_DATA
+                | TRB_CHAIN
+                | (transfer_type << SETUP_TRANSFER_TYPE_SHIFT),
+        }
+    }
+
+    const fn data_stage(buffer: u64, length: u16, direction: TransferDirection) -> Self {
+        let direction_bit = match direction {
+            TransferDirection::In => TRB_DIRECTION_IN,
+            TransferDirection::None | TransferDirection::Out => 0,
+        };
+        Self {
+            parameter: buffer,
+            status: length as u32,
+            control: (TRB_TYPE_DATA_STAGE << TRB_TYPE_SHIFT)
+                | TRB_CHAIN
+                | TRB_INTERRUPT_ON_SHORT_PACKET
+                | direction_bit,
+        }
+    }
+
+    const fn status_stage(direction: TransferDirection) -> Self {
+        let direction_bit = match direction {
+            TransferDirection::In => TRB_DIRECTION_IN,
+            TransferDirection::None | TransferDirection::Out => 0,
+        };
+        Self {
+            parameter: 0,
+            status: 0,
+            control: (TRB_TYPE_STATUS_STAGE << TRB_TYPE_SHIFT)
+                | TRB_INTERRUPT_ON_COMPLETION
+                | direction_bit,
+        }
+    }
+
+    const fn normal(buffer: u64, length: u16) -> Self {
+        Self {
+            parameter: buffer,
+            status: length as u32,
+            control: (TRB_TYPE_NORMAL << TRB_TYPE_SHIFT)
+                | TRB_INTERRUPT_ON_SHORT_PACKET
+                | TRB_INTERRUPT_ON_COMPLETION,
+        }
+    }
+
     const fn with_cycle(mut self, cycle: bool) -> Self {
         self.control &= !TRB_CYCLE;
         if cycle {
@@ -256,6 +374,471 @@ impl Trb {
     const fn slot_id(self) -> u8 {
         (self.control >> 24) as u8
     }
+
+    const fn endpoint_id(self) -> u8 {
+        ((self.control >> 16) & 0x1F) as u8
+    }
+
+    const fn transfer_length(self) -> u32 {
+        self.status & 0x00FF_FFFF
+    }
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UsbSetupPacket {
+    request_type: u8,
+    request: u8,
+    value: u16,
+    index: u16,
+    length: u16,
+}
+
+impl UsbSetupPacket {
+    const fn new(request_type: u8, request: u8, value: u16, index: u16, length: u16) -> Self {
+        Self {
+            request_type,
+            request,
+            value,
+            index,
+            length,
+        }
+    }
+
+    const fn to_bytes(self) -> [u8; 8] {
+        let value = self.value.to_le_bytes();
+        let index = self.index.to_le_bytes();
+        let length = self.length.to_le_bytes();
+        [
+            self.request_type,
+            self.request,
+            value[0],
+            value[1],
+            index[0],
+            index[1],
+            length[0],
+            length[1],
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferDirection {
+    None,
+    Out,
+    In,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UsbDeviceDescriptor {
+    pub usb_version: u16,
+    pub max_packet_size_zero: u16,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub configurations: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HidKeyboardDescriptor {
+    pub configuration_value: u8,
+    pub interface_number: u8,
+    pub endpoint_address: u8,
+    pub max_packet_size: u16,
+    pub interval: u8,
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let value = bytes.get(offset..offset.checked_add(2)?)?;
+    Some(u16::from_le_bytes([value[0], value[1]]))
+}
+
+pub(crate) fn parse_device_descriptor(
+    bytes: &[u8],
+    speed_id: u8,
+) -> Result<UsbDeviceDescriptor, XhciInitError> {
+    if bytes.len() < 18 || bytes[0] != 18 || bytes[1] != USB_DESCRIPTOR_DEVICE {
+        return Err(XhciInitError::InvalidDescriptor);
+    }
+    let encoded_packet_size = bytes[7];
+    let max_packet_size_zero = match speed_id {
+        1 if matches!(encoded_packet_size, 8 | 16 | 32 | 64) => u16::from(encoded_packet_size),
+        2 if encoded_packet_size == 8 => 8,
+        3 if encoded_packet_size == 64 => 64,
+        4 | 5 if encoded_packet_size == 9 => 512,
+        _ => return Err(XhciInitError::InvalidDescriptor),
+    };
+    let configurations = bytes[17];
+    if configurations == 0 {
+        return Err(XhciInitError::InvalidDescriptor);
+    }
+    Ok(UsbDeviceDescriptor {
+        usb_version: read_u16(bytes, 2).ok_or(XhciInitError::InvalidDescriptor)?,
+        max_packet_size_zero,
+        vendor_id: read_u16(bytes, 8).ok_or(XhciInitError::InvalidDescriptor)?,
+        product_id: read_u16(bytes, 10).ok_or(XhciInitError::InvalidDescriptor)?,
+        configurations,
+    })
+}
+
+pub(crate) fn configuration_total_length(bytes: &[u8]) -> Result<u16, XhciInitError> {
+    if bytes.len() < 9 || bytes[0] < 9 || bytes[1] != USB_DESCRIPTOR_CONFIGURATION {
+        return Err(XhciInitError::InvalidDescriptor);
+    }
+    let total = read_u16(bytes, 2).ok_or(XhciInitError::InvalidDescriptor)?;
+    if total < 9 {
+        return Err(XhciInitError::InvalidDescriptor);
+    }
+    if usize::from(total) > FRAME_SIZE {
+        return Err(XhciInitError::DescriptorTooLarge);
+    }
+    Ok(total)
+}
+
+pub(crate) fn parse_hid_keyboard_configuration(
+    bytes: &[u8],
+) -> Result<HidKeyboardDescriptor, XhciInitError> {
+    let total = usize::from(configuration_total_length(bytes)?);
+    if bytes.len() < total || bytes[0] < 9 || bytes[0] as usize > total {
+        return Err(XhciInitError::InvalidDescriptor);
+    }
+    let configuration_value = bytes[5];
+    if configuration_value == 0 {
+        return Err(XhciInitError::InvalidDescriptor);
+    }
+
+    let mut offset = 0usize;
+    let mut boot_keyboard_interface = None;
+    while offset < total {
+        let header = bytes
+            .get(
+                offset
+                    ..offset
+                        .checked_add(2)
+                        .ok_or(XhciInitError::InvalidDescriptor)?,
+            )
+            .ok_or(XhciInitError::InvalidDescriptor)?;
+        let length = usize::from(header[0]);
+        if length < 2 {
+            return Err(XhciInitError::InvalidDescriptor);
+        }
+        let end = offset
+            .checked_add(length)
+            .ok_or(XhciInitError::InvalidDescriptor)?;
+        if end > total {
+            return Err(XhciInitError::InvalidDescriptor);
+        }
+
+        match header[1] {
+            USB_DESCRIPTOR_INTERFACE => {
+                if length < 9 {
+                    return Err(XhciInitError::InvalidDescriptor);
+                }
+                let descriptor = &bytes[offset..end];
+                boot_keyboard_interface = (descriptor[3] == 0
+                    && descriptor[5] == USB_CLASS_HID
+                    && descriptor[6] == HID_SUBCLASS_BOOT
+                    && descriptor[7] == HID_PROTOCOL_KEYBOARD)
+                    .then_some(descriptor[2]);
+            }
+            USB_DESCRIPTOR_ENDPOINT => {
+                if length < 7 {
+                    return Err(XhciInitError::InvalidDescriptor);
+                }
+                if let Some(interface_number) = boot_keyboard_interface {
+                    let descriptor = &bytes[offset..end];
+                    let address = descriptor[2];
+                    let attributes = descriptor[3];
+                    let max_packet_size =
+                        read_u16(descriptor, 4).ok_or(XhciInitError::InvalidDescriptor)? & 0x07FF;
+                    let interval = descriptor[6];
+                    if address & USB_ENDPOINT_DIRECTION_IN != 0
+                        && address & 0x0F != 0
+                        && attributes & USB_ENDPOINT_TRANSFER_TYPE_MASK
+                            == USB_ENDPOINT_TRANSFER_INTERRUPT
+                        && max_packet_size >= HID_BOOT_REPORT_BYTES as u16
+                        && max_packet_size <= 1024
+                        && interval != 0
+                    {
+                        return Ok(HidKeyboardDescriptor {
+                            configuration_value,
+                            interface_number,
+                            endpoint_address: address,
+                            max_packet_size,
+                            interval,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        offset = end;
+    }
+    Err(XhciInitError::HidKeyboardNotFound)
+}
+
+const fn endpoint_id(endpoint_address: u8) -> Option<u8> {
+    let number = endpoint_address & 0x0F;
+    if number == 0 {
+        return Some(1);
+    }
+    if endpoint_address & USB_ENDPOINT_DIRECTION_IN != 0 {
+        Some(number * 2 + 1)
+    } else {
+        Some(number * 2)
+    }
+}
+
+fn interrupt_interval(speed_id: u8, descriptor_interval: u8) -> Option<u8> {
+    if descriptor_interval == 0 {
+        return None;
+    }
+    match speed_id {
+        // Full/low-speed bInterval is expressed in frames. Convert it to the
+        // closest xHCI power-of-two microframe exponent without exceeding the
+        // controller's 0..15 field.
+        1 | 2 => {
+            let microframes = u32::from(descriptor_interval) * 8;
+            Some((31 - microframes.leading_zeros()).min(15) as u8)
+        }
+        // High/SuperSpeed descriptors already encode a 1-based exponent.
+        3..=5 => Some(descriptor_interval.saturating_sub(1).min(15)),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RingCursor {
+    enqueue_index: usize,
+    cycle: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RingReservation {
+    start_index: usize,
+    cycle: bool,
+    reached_link: bool,
+}
+
+impl RingCursor {
+    const fn new() -> Self {
+        Self {
+            enqueue_index: 0,
+            cycle: true,
+        }
+    }
+
+    fn reserve(&mut self, trb_count: usize) -> Result<RingReservation, XhciInitError> {
+        if trb_count == 0
+            || trb_count > COMMAND_RING_USABLE_TRBS
+            || self.enqueue_index + trb_count > COMMAND_RING_USABLE_TRBS
+        {
+            return Err(XhciInitError::RingFull);
+        }
+        let reservation = RingReservation {
+            start_index: self.enqueue_index,
+            cycle: self.cycle,
+            reached_link: self.enqueue_index + trb_count == COMMAND_RING_USABLE_TRBS,
+        };
+        self.enqueue_index += trb_count;
+        if reservation.reached_link {
+            self.enqueue_index = 0;
+            self.cycle = !self.cycle;
+        }
+        Ok(reservation)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferOwner {
+    Control,
+    Hid,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingCommand {
+    trb_pointer: u64,
+    expected_slot: Option<u8>,
+    completion: Option<Trb>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingTransfer {
+    owner: TransferOwner,
+    trb_pointer: u64,
+    short_packet_pointer: Option<u64>,
+    slot_id: u8,
+    endpoint_id: u8,
+    requested_length: u16,
+    completion: Option<Trb>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EventDispatchState {
+    command: Option<PendingCommand>,
+    transfer: Option<PendingTransfer>,
+    changed_ports: u64,
+    unexpected_events: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HidReportCompletion {
+    slot_id: u8,
+    endpoint_address: u8,
+    actual_length: u16,
+    report: [u8; HID_BOOT_REPORT_BYTES],
+}
+
+impl EventDispatchState {
+    const fn new() -> Self {
+        Self {
+            command: None,
+            transfer: None,
+            changed_ports: 0,
+            unexpected_events: 0,
+        }
+    }
+
+    fn dispatch(&mut self, event: Trb) {
+        let accepted = match event.trb_type() {
+            TRB_TYPE_COMMAND_COMPLETION_EVENT => self.command.as_mut().is_some_and(|pending| {
+                let pointer_matches = event.parameter & !0xF == pending.trb_pointer;
+                let slot_matches = pending
+                    .expected_slot
+                    .is_none_or(|slot| event.slot_id() == slot);
+                if pointer_matches && slot_matches {
+                    pending.completion = Some(event);
+                    true
+                } else {
+                    false
+                }
+            }),
+            TRB_TYPE_TRANSFER_EVENT => self.transfer.as_mut().is_some_and(|pending| {
+                let pointer = event.parameter & !0xF;
+                let pointer_matches = pointer == pending.trb_pointer
+                    || (event.completion_code() == COMPLETION_CODE_SHORT_PACKET
+                        && pending.short_packet_pointer == Some(pointer));
+                if pointer_matches
+                    && event.slot_id() == pending.slot_id
+                    && event.endpoint_id() == pending.endpoint_id
+                {
+                    pending.completion = Some(event);
+                    true
+                } else {
+                    false
+                }
+            }),
+            TRB_TYPE_PORT_STATUS_CHANGE_EVENT => {
+                let port_id = (event.parameter >> 24) as u8;
+                if (1..=64).contains(&port_id) {
+                    self.changed_ports |= 1u64 << (port_id - 1);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if !accepted {
+            self.unexpected_events = self.unexpected_events.saturating_add(1);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HidKeyboardDecoder {
+    previous: [u8; HID_BOOT_REPORT_BYTES],
+}
+
+impl HidKeyboardDecoder {
+    const fn new() -> Self {
+        Self {
+            previous: [0; HID_BOOT_REPORT_BYTES],
+        }
+    }
+
+    fn decode(&mut self, report: [u8; HID_BOOT_REPORT_BYTES]) -> HidDecodedKeys {
+        let mut decoded = HidDecodedKeys::new();
+        if report[2..].iter().any(|usage| (1..=3).contains(usage)) {
+            return decoded;
+        }
+        let shift = report[0] & 0x22 != 0;
+        for usage in report[2..].iter().copied().filter(|usage| *usage != 0) {
+            if self.previous[2..].contains(&usage) {
+                continue;
+            }
+            if let Some(character) = hid_usage_to_char(usage, shift) {
+                decoded.push(character);
+            }
+        }
+        self.previous = report;
+        decoded
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HidDecodedKeys {
+    characters: [char; 6],
+    len: u8,
+}
+
+impl HidDecodedKeys {
+    const fn new() -> Self {
+        Self {
+            characters: ['\0'; 6],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, character: char) {
+        if let Some(slot) = self.characters.get_mut(usize::from(self.len)) {
+            *slot = character;
+            self.len += 1;
+        }
+    }
+
+    fn iter(self) -> impl Iterator<Item = char> {
+        self.characters.into_iter().take(usize::from(self.len))
+    }
+}
+
+fn hid_usage_to_char(usage: u8, shift: bool) -> Option<char> {
+    let (plain, shifted) = match usage {
+        0x04..=0x1D => {
+            let lower = char::from(b'a' + usage - 0x04);
+            return Some(if shift {
+                lower.to_ascii_uppercase()
+            } else {
+                lower
+            });
+        }
+        0x1E => ('1', '!'),
+        0x1F => ('2', '@'),
+        0x20 => ('3', '#'),
+        0x21 => ('4', '$'),
+        0x22 => ('5', '%'),
+        0x23 => ('6', '^'),
+        0x24 => ('7', '&'),
+        0x25 => ('8', '*'),
+        0x26 => ('9', '('),
+        0x27 => ('0', ')'),
+        0x28 => ('\n', '\n'),
+        0x2A => ('\x08', '\x08'),
+        0x2B => ('\t', '\t'),
+        0x2C => (' ', ' '),
+        0x2D => ('-', '_'),
+        0x2E => ('=', '+'),
+        0x2F => ('[', '{'),
+        0x30 => (']', '}'),
+        0x31 => ('\\', '|'),
+        0x33 => (';', ':'),
+        0x34 => ('\'', '"'),
+        0x35 => ('`', '~'),
+        0x36 => (',', '<'),
+        0x37 => ('.', '>'),
+        0x38 => ('/', '?'),
+        _ => return None,
+    };
+    Some(if shift { shifted } else { plain })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,6 +892,7 @@ impl SupportedProtocols {
     }
 }
 
+#[derive(Clone, Copy)]
 struct XhciDevice {
     slot_id: u8,
     port_id: u8,
@@ -316,6 +900,18 @@ struct XhciDevice {
     device_context: DmaRegion,
     input_context: DmaRegion,
     endpoint_zero_ring: DmaRegion,
+    endpoint_zero_cursor: RingCursor,
+    descriptor_buffer: DmaRegion,
+    configuration_value: u8,
+    hid_interface: u8,
+    hid_endpoint_address: u8,
+    hid_endpoint_id: u8,
+    hid_interval: u8,
+    hid_max_packet_size: u16,
+    hid_transfer_ring: Option<DmaRegion>,
+    hid_transfer_cursor: RingCursor,
+    hid_report_buffer: Option<DmaRegion>,
+    hid_transfer_pending: bool,
 }
 
 #[repr(C)]
@@ -335,14 +931,17 @@ struct XhciController {
     event_ring_segment_table: DmaRegion,
     scratchpad_array: Option<DmaRegion>,
     scratchpad_storage: Option<DmaRegion>,
+    context_size: usize,
     command_enqueue_index: usize,
     command_cycle: bool,
     event_dequeue_index: usize,
     event_cycle: bool,
+    events: EventDispatchState,
     first_device: Option<XhciDevice>,
 }
 
 static XHCI_CONTROLLER: Once<Mutex<XhciController>> = Once::new();
+static HID_DECODER: Mutex<HidKeyboardDecoder> = Mutex::new(HidKeyboardDecoder::new());
 
 pub fn find_controller() -> Option<PciDevice> {
     pci::find_device(|device| {
@@ -396,6 +995,15 @@ fn parse_capabilities(
         addressed_port: 0,
         addressed_slot: 0,
         addressed_speed_id: 0,
+        device_vendor_id: 0,
+        device_product_id: 0,
+        device_configurations: 0,
+        hid_keyboard_ready: false,
+        hid_interface: 0,
+        hid_endpoint_address: 0,
+        hid_endpoint_dci: 0,
+        hid_max_packet_size: 0,
+        hid_interval: 0,
         command_probe_completed: false,
         running: false,
     })
@@ -771,6 +1379,88 @@ fn write_dma_u64(region: DmaRegion, offset: usize, value: u64) -> Result<(), Xhc
 }
 
 #[cfg(target_os = "none")]
+fn read_dma_u32(region: DmaRegion, offset: usize) -> Result<u32, XhciInitError> {
+    let pointer = region
+        .pointer_at::<u32>(offset)
+        .ok_or(XhciInitError::InvalidCapabilities)?;
+    Ok(unsafe { core::ptr::read_volatile(pointer) })
+}
+
+#[cfg(target_os = "none")]
+fn clear_dma(region: DmaRegion, bytes: usize) -> Result<(), XhciInitError> {
+    if bytes > region.len() {
+        return Err(XhciInitError::InvalidCapabilities);
+    }
+    unsafe { core::ptr::write_bytes(region.virtual_start() as *mut u8, 0, bytes) };
+    Ok(())
+}
+
+#[cfg(target_os = "none")]
+fn copy_from_dma(region: DmaRegion, output: &mut [u8]) -> Result<(), XhciInitError> {
+    if output.len() > region.len() {
+        return Err(XhciInitError::InvalidCapabilities);
+    }
+    for (offset, byte) in output.iter_mut().enumerate() {
+        let pointer = region
+            .pointer_at::<u8>(offset)
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        *byte = unsafe { core::ptr::read_volatile(pointer) };
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "none")]
+fn copy_context(
+    source: DmaRegion,
+    source_offset: usize,
+    destination: DmaRegion,
+    destination_offset: usize,
+    bytes: usize,
+) -> Result<(), XhciInitError> {
+    if !bytes.is_multiple_of(core::mem::size_of::<u32>()) {
+        return Err(XhciInitError::InvalidCapabilities);
+    }
+    for offset in (0..bytes).step_by(core::mem::size_of::<u32>()) {
+        let value = read_dma_u32(source, source_offset + offset)?;
+        write_dma_u32(destination, destination_offset + offset, value)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "none")]
+fn enqueue_transfer_td(
+    ring: DmaRegion,
+    cursor: &mut RingCursor,
+    trbs: &[Trb],
+) -> Result<u64, XhciInitError> {
+    let reservation = cursor.reserve(trbs.len())?;
+    let mut final_physical = 0;
+    for (relative, trb) in trbs.iter().copied().enumerate() {
+        let index = reservation.start_index + relative;
+        let offset = index * core::mem::size_of::<Trb>();
+        let pointer = ring
+            .pointer_at::<Trb>(offset)
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        final_physical = ring
+            .physical_at(offset)
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        unsafe { core::ptr::write_volatile(pointer, trb.with_cycle(reservation.cycle)) };
+    }
+    if reservation.reached_link {
+        let link_pointer = ring
+            .pointer_at::<Trb>(COMMAND_RING_USABLE_TRBS * core::mem::size_of::<Trb>())
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        unsafe {
+            core::ptr::write_volatile(
+                link_pointer,
+                Trb::link(ring.physical_start()).with_cycle(reservation.cycle),
+            )
+        };
+    }
+    Ok(final_physical)
+}
+
+#[cfg(target_os = "none")]
 fn allocate_device(
     frame_allocator: &mut BitmapFrameAllocator,
     physical_memory_offset: u64,
@@ -793,6 +1483,12 @@ fn allocate_device(
         FRAME_SIZE,
     )?;
     let endpoint_zero_ring = DmaRegion::allocate(
+        frame_allocator,
+        physical_memory_offset,
+        FRAME_SIZE,
+        FRAME_SIZE,
+    )?;
+    let descriptor_buffer = DmaRegion::allocate(
         frame_allocator,
         physical_memory_offset,
         FRAME_SIZE,
@@ -848,6 +1544,18 @@ fn allocate_device(
         device_context,
         input_context,
         endpoint_zero_ring,
+        endpoint_zero_cursor: RingCursor::new(),
+        descriptor_buffer,
+        configuration_value: 0,
+        hid_interface: 0,
+        hid_endpoint_address: 0,
+        hid_endpoint_id: 0,
+        hid_interval: 0,
+        hid_max_packet_size: 0,
+        hid_transfer_ring: None,
+        hid_transfer_cursor: RingCursor::new(),
+        hid_report_buffer: None,
+        hid_transfer_pending: false,
     })
 }
 
@@ -889,7 +1597,25 @@ impl XhciController {
         )
     }
 
+    fn dispatch_one_event(&mut self) -> Result<bool, XhciInitError> {
+        let event_pointer = self
+            .event_ring
+            .pointer_at::<Trb>(self.event_dequeue_index * core::mem::size_of::<Trb>())
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        let event = unsafe { core::ptr::read_volatile(event_pointer) };
+        if (event.control & TRB_CYCLE != 0) != self.event_cycle {
+            return Ok(false);
+        }
+        fence(Ordering::Acquire);
+        self.events.dispatch(event);
+        self.advance_event_ring()?;
+        Ok(true)
+    }
+
     fn submit_command(&mut self, command: Trb) -> Result<Trb, XhciInitError> {
+        if self.events.command.is_some() {
+            return Err(XhciInitError::Busy);
+        }
         let command_offset = self.command_enqueue_index * core::mem::size_of::<Trb>();
         let command_physical = self
             .command_ring
@@ -902,36 +1628,460 @@ impl XhciController {
         unsafe {
             core::ptr::write_volatile(command_pointer, command.with_cycle(self.command_cycle))
         };
+        let expected_slot = match command.trb_type() {
+            TRB_TYPE_ADDRESS_DEVICE_COMMAND | TRB_TYPE_CONFIGURE_ENDPOINT_COMMAND => {
+                Some(command.slot_id())
+            }
+            _ => None,
+        };
+        self.events.command = Some(PendingCommand {
+            trb_pointer: command_physical,
+            expected_slot,
+            completion: None,
+        });
         fence(Ordering::Release);
         self.advance_command_ring()?;
         write_mmio_u32(self.info.mmio, self.layout.doorbell_base, 0)?;
 
         for _ in 0..MAX_POLL_SPINS {
-            let event_pointer = self
-                .event_ring
-                .pointer_at::<Trb>(self.event_dequeue_index * core::mem::size_of::<Trb>())
-                .ok_or(XhciInitError::InvalidCapabilities)?;
-            let event = unsafe { core::ptr::read_volatile(event_pointer) };
-            let event_cycle = event.control & TRB_CYCLE != 0;
-            if event_cycle != self.event_cycle {
+            self.dispatch_one_event()?;
+            let completion = self
+                .events
+                .command
+                .as_ref()
+                .and_then(|pending| pending.completion);
+            let Some(event) = completion else {
                 core::hint::spin_loop();
                 continue;
-            }
-            fence(Ordering::Acquire);
-            self.advance_event_ring()?;
-
-            if event.trb_type() != TRB_TYPE_COMMAND_COMPLETION_EVENT {
-                continue;
-            }
-            if event.parameter & !0xF != command_physical {
-                continue;
-            }
+            };
+            self.events.command = None;
             if event.completion_code() != COMPLETION_CODE_SUCCESS {
                 return Err(XhciInitError::CommandFailed(event.completion_code()));
             }
             return Ok(event);
         }
         Err(XhciInitError::CommandCompletionTimeout)
+    }
+
+    fn wait_for_transfer(&mut self, owner: TransferOwner) -> Result<u16, XhciInitError> {
+        for _ in 0..MAX_POLL_SPINS {
+            self.dispatch_one_event()?;
+            let pending = self
+                .events
+                .transfer
+                .filter(|pending| pending.owner == owner && pending.completion.is_some());
+            let Some(pending) = pending else {
+                core::hint::spin_loop();
+                continue;
+            };
+            self.events.transfer = None;
+            let event = pending
+                .completion
+                .ok_or(XhciInitError::InvalidTransferCompletion)?;
+            return match event.completion_code() {
+                COMPLETION_CODE_SUCCESS => Ok(pending.requested_length),
+                COMPLETION_CODE_SHORT_PACKET => {
+                    let remaining = u16::try_from(event.transfer_length())
+                        .map_err(|_| XhciInitError::InvalidTransferCompletion)?;
+                    pending
+                        .requested_length
+                        .checked_sub(remaining)
+                        .ok_or(XhciInitError::InvalidTransferCompletion)
+                }
+                code => Err(XhciInitError::TransferFailed(code)),
+            };
+        }
+        Err(XhciInitError::TransferTimeout)
+    }
+
+    fn control_transfer(&mut self, packet: UsbSetupPacket) -> Result<u16, XhciInitError> {
+        if self.events.transfer.is_some() || usize::from(packet.length) > FRAME_SIZE {
+            return Err(if self.events.transfer.is_some() {
+                XhciInitError::Busy
+            } else {
+                XhciInitError::DescriptorTooLarge
+            });
+        }
+        let direction = if packet.length == 0 {
+            TransferDirection::None
+        } else if packet.request_type & USB_ENDPOINT_DIRECTION_IN != 0 {
+            TransferDirection::In
+        } else {
+            TransferDirection::Out
+        };
+        let (ring, mut cursor, buffer, slot_id) = {
+            let device = self
+                .first_device
+                .as_ref()
+                .ok_or(XhciInitError::InvalidCapabilities)?;
+            (
+                device.endpoint_zero_ring,
+                device.endpoint_zero_cursor,
+                device.descriptor_buffer,
+                device.slot_id,
+            )
+        };
+        clear_dma(buffer, usize::from(packet.length))?;
+
+        let setup = Trb::setup_stage(packet, direction);
+        let status_direction = match direction {
+            TransferDirection::In => TransferDirection::Out,
+            TransferDirection::None | TransferDirection::Out => TransferDirection::In,
+        };
+        let data = Trb::data_stage(buffer.physical_start(), packet.length, direction);
+        let status = Trb::status_stage(status_direction);
+        let mut stages = [setup, data, status];
+        let stage_count = if direction == TransferDirection::None {
+            stages[1] = status;
+            2
+        } else {
+            3
+        };
+        let final_pointer = enqueue_transfer_td(ring, &mut cursor, &stages[..stage_count])?;
+        let short_packet_pointer = if direction == TransferDirection::None {
+            None
+        } else {
+            Some(
+                final_pointer
+                    .checked_sub(core::mem::size_of::<Trb>() as u64)
+                    .ok_or(XhciInitError::InvalidCapabilities)?,
+            )
+        };
+        self.first_device
+            .as_mut()
+            .ok_or(XhciInitError::InvalidCapabilities)?
+            .endpoint_zero_cursor = cursor;
+        self.events.transfer = Some(PendingTransfer {
+            owner: TransferOwner::Control,
+            trb_pointer: final_pointer,
+            short_packet_pointer,
+            slot_id,
+            endpoint_id: 1,
+            requested_length: packet.length,
+            completion: None,
+        });
+        fence(Ordering::Release);
+        write_mmio_u32(
+            self.info.mmio,
+            self.layout.doorbell_base + u64::from(slot_id) * 4,
+            1,
+        )?;
+        self.wait_for_transfer(TransferOwner::Control)
+    }
+
+    fn get_descriptor(&mut self, descriptor_type: u8, length: u16) -> Result<u16, XhciInitError> {
+        self.control_transfer(UsbSetupPacket::new(
+            USB_REQUEST_TYPE_DEVICE_IN,
+            USB_REQUEST_GET_DESCRIPTOR,
+            u16::from(descriptor_type) << 8,
+            0,
+            length,
+        ))
+    }
+
+    fn configure_hid_endpoint(
+        &mut self,
+        frame_allocator: &mut BitmapFrameAllocator,
+        physical_memory_offset: u64,
+        descriptor: HidKeyboardDescriptor,
+    ) -> Result<(), XhciInitError> {
+        let endpoint_dci = endpoint_id(descriptor.endpoint_address)
+            .filter(|endpoint| *endpoint > 1 && *endpoint < CONTEXTS_PER_DEVICE as u8)
+            .ok_or(XhciInitError::InvalidDescriptor)?;
+        let interval = interrupt_interval(
+            self.first_device
+                .as_ref()
+                .ok_or(XhciInitError::InvalidCapabilities)?
+                .speed_id,
+            descriptor.interval,
+        )
+        .ok_or(XhciInitError::InvalidDescriptor)?;
+        let transfer_ring = DmaRegion::allocate(
+            frame_allocator,
+            physical_memory_offset,
+            FRAME_SIZE,
+            FRAME_SIZE,
+        )?;
+        let report_buffer = DmaRegion::allocate(
+            frame_allocator,
+            physical_memory_offset,
+            FRAME_SIZE,
+            FRAME_SIZE,
+        )?;
+        let link_pointer = transfer_ring
+            .pointer_at::<Trb>(COMMAND_RING_USABLE_TRBS * core::mem::size_of::<Trb>())
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        unsafe {
+            core::ptr::write_volatile(link_pointer, Trb::link(transfer_ring.physical_start()))
+        };
+
+        let device = self
+            .first_device
+            .as_ref()
+            .copied()
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        copy_context(
+            device.device_context,
+            0,
+            device.input_context,
+            self.context_size,
+            self.context_size,
+        )?;
+        write_dma_u32(device.input_context, 0, 0)?;
+        write_dma_u32(
+            device.input_context,
+            4,
+            1 | (1u32 << u32::from(endpoint_dci)),
+        )?;
+        let slot_context = self.context_size;
+        let mut slot_dword_zero = read_dma_u32(device.input_context, slot_context)?;
+        slot_dword_zero &= !(0x1F << 27);
+        slot_dword_zero |= u32::from(endpoint_dci) << 27;
+        write_dma_u32(device.input_context, slot_context, slot_dword_zero)?;
+
+        let endpoint_context = self.context_size * (usize::from(endpoint_dci) + 1);
+        write_dma_u32(
+            device.input_context,
+            endpoint_context,
+            u32::from(interval) << 16,
+        )?;
+        write_dma_u32(
+            device.input_context,
+            endpoint_context + 4,
+            (u32::from(descriptor.max_packet_size) << 16) | (3 << 1) | (7 << 3),
+        )?;
+        write_dma_u64(
+            device.input_context,
+            endpoint_context + 8,
+            transfer_ring.physical_start() | 1,
+        )?;
+        write_dma_u32(
+            device.input_context,
+            endpoint_context + 16,
+            u32::from(HID_BOOT_REPORT_BYTES as u16) | (u32::from(descriptor.max_packet_size) << 16),
+        )?;
+        fence(Ordering::Release);
+        self.submit_command(Trb::configure_endpoint_command(
+            device.input_context.physical_start(),
+            device.slot_id,
+        ))?;
+
+        let device = self
+            .first_device
+            .as_mut()
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        device.configuration_value = descriptor.configuration_value;
+        device.hid_interface = descriptor.interface_number;
+        device.hid_endpoint_address = descriptor.endpoint_address;
+        device.hid_endpoint_id = endpoint_dci;
+        device.hid_interval = interval;
+        device.hid_max_packet_size = descriptor.max_packet_size;
+        device.hid_transfer_ring = Some(transfer_ring);
+        device.hid_report_buffer = Some(report_buffer);
+
+        self.info.hid_keyboard_ready = true;
+        self.info.hid_interface = descriptor.interface_number;
+        self.info.hid_endpoint_address = descriptor.endpoint_address;
+        self.info.hid_endpoint_dci = endpoint_dci;
+        self.info.hid_max_packet_size = descriptor.max_packet_size;
+        self.info.hid_interval = interval;
+        self.arm_hid_transfer()
+    }
+
+    fn enumerate_hid_keyboard(
+        &mut self,
+        frame_allocator: &mut BitmapFrameAllocator,
+        physical_memory_offset: u64,
+    ) -> Result<(), XhciInitError> {
+        let device_length = self.get_descriptor(USB_DESCRIPTOR_DEVICE, 18)?;
+        if device_length < 18 {
+            return Err(XhciInitError::InvalidDescriptor);
+        }
+        let (descriptor_buffer, speed_id) = {
+            let device = self
+                .first_device
+                .as_ref()
+                .ok_or(XhciInitError::InvalidCapabilities)?;
+            (device.descriptor_buffer, device.speed_id)
+        };
+        let device_bytes = unsafe {
+            core::slice::from_raw_parts(descriptor_buffer.virtual_start() as *const u8, 18)
+        };
+        let device_descriptor = parse_device_descriptor(device_bytes, speed_id)?;
+        self.info.device_vendor_id = device_descriptor.vendor_id;
+        self.info.device_product_id = device_descriptor.product_id;
+        self.info.device_configurations = device_descriptor.configurations;
+
+        let header_length = self.get_descriptor(USB_DESCRIPTOR_CONFIGURATION, 9)?;
+        if header_length < 9 {
+            return Err(XhciInitError::InvalidDescriptor);
+        }
+        let header = unsafe {
+            core::slice::from_raw_parts(descriptor_buffer.virtual_start() as *const u8, 9)
+        };
+        let total_length = configuration_total_length(header)?;
+        let actual_length = self.get_descriptor(USB_DESCRIPTOR_CONFIGURATION, total_length)?;
+        if actual_length < total_length {
+            return Err(XhciInitError::InvalidDescriptor);
+        }
+        let configuration = unsafe {
+            core::slice::from_raw_parts(
+                descriptor_buffer.virtual_start() as *const u8,
+                usize::from(total_length),
+            )
+        };
+        let hid = parse_hid_keyboard_configuration(configuration)?;
+
+        self.control_transfer(UsbSetupPacket::new(
+            USB_REQUEST_TYPE_DEVICE_OUT,
+            USB_REQUEST_SET_CONFIGURATION,
+            u16::from(hid.configuration_value),
+            0,
+            0,
+        ))?;
+        self.control_transfer(UsbSetupPacket::new(
+            USB_REQUEST_TYPE_HID_INTERFACE_OUT,
+            HID_REQUEST_SET_PROTOCOL,
+            0,
+            u16::from(hid.interface_number),
+            0,
+        ))?;
+        self.configure_hid_endpoint(frame_allocator, physical_memory_offset, hid)
+    }
+
+    fn arm_hid_transfer(&mut self) -> Result<(), XhciInitError> {
+        if self.events.transfer.is_some() {
+            return Err(XhciInitError::Busy);
+        }
+        let (ring, mut cursor, report_buffer, slot_id, endpoint_dci, already_pending) = {
+            let device = self
+                .first_device
+                .as_ref()
+                .ok_or(XhciInitError::InvalidCapabilities)?;
+            (
+                device
+                    .hid_transfer_ring
+                    .ok_or(XhciInitError::HidKeyboardNotFound)?,
+                device.hid_transfer_cursor,
+                device
+                    .hid_report_buffer
+                    .ok_or(XhciInitError::HidKeyboardNotFound)?,
+                device.slot_id,
+                device.hid_endpoint_id,
+                device.hid_transfer_pending,
+            )
+        };
+        if already_pending {
+            return Err(XhciInitError::Busy);
+        }
+        clear_dma(report_buffer, HID_BOOT_REPORT_BYTES)?;
+        let final_pointer = enqueue_transfer_td(
+            ring,
+            &mut cursor,
+            &[Trb::normal(
+                report_buffer.physical_start(),
+                HID_BOOT_REPORT_BYTES as u16,
+            )],
+        )?;
+        let device = self
+            .first_device
+            .as_mut()
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        device.hid_transfer_cursor = cursor;
+        device.hid_transfer_pending = true;
+        self.events.transfer = Some(PendingTransfer {
+            owner: TransferOwner::Hid,
+            trb_pointer: final_pointer,
+            short_packet_pointer: None,
+            slot_id,
+            endpoint_id: endpoint_dci,
+            requested_length: HID_BOOT_REPORT_BYTES as u16,
+            completion: None,
+        });
+        fence(Ordering::Release);
+        write_mmio_u32(
+            self.info.mmio,
+            self.layout.doorbell_base + u64::from(slot_id) * 4,
+            u32::from(endpoint_dci),
+        )
+    }
+
+    fn poll_hid_report(&mut self) -> Result<Option<HidReportCompletion>, XhciInitError> {
+        for _ in 0..RUNTIME_EVENT_BUDGET {
+            if !self.dispatch_one_event()? {
+                break;
+            }
+        }
+        let pending = self
+            .events
+            .transfer
+            .filter(|pending| pending.owner == TransferOwner::Hid && pending.completion.is_some());
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+        self.events.transfer = None;
+        let event = pending
+            .completion
+            .ok_or(XhciInitError::InvalidTransferCompletion)?;
+        let actual_length = match event.completion_code() {
+            COMPLETION_CODE_SUCCESS => pending.requested_length,
+            COMPLETION_CODE_SHORT_PACKET => pending
+                .requested_length
+                .checked_sub(
+                    u16::try_from(event.transfer_length())
+                        .map_err(|_| XhciInitError::InvalidTransferCompletion)?,
+                )
+                .ok_or(XhciInitError::InvalidTransferCompletion)?,
+            code => {
+                if let Some(device) = self.first_device.as_mut() {
+                    device.hid_transfer_pending = false;
+                }
+                self.info.hid_keyboard_ready = false;
+                return Err(XhciInitError::TransferFailed(code));
+            }
+        };
+
+        let (report_buffer, port_id, endpoint_address) = {
+            let device = self
+                .first_device
+                .as_mut()
+                .ok_or(XhciInitError::InvalidCapabilities)?;
+            device.hid_transfer_pending = false;
+            (
+                device
+                    .hid_report_buffer
+                    .ok_or(XhciInitError::HidKeyboardNotFound)?,
+                device.port_id,
+                device.hid_endpoint_address,
+            )
+        };
+        let changed_bit = 1u64 << (port_id - 1);
+        if self.events.changed_ports & changed_bit != 0 {
+            self.events.changed_ports &= !changed_bit;
+            let connected = read_mmio_u32(self.info.mmio, self.layout.port(port_id, PORTSC)?)?
+                & PORTSC_CURRENT_CONNECT_STATUS
+                != 0;
+            if !connected {
+                self.info.hid_keyboard_ready = false;
+                return Ok(None);
+            }
+        }
+
+        let mut report = [0u8; HID_BOOT_REPORT_BYTES];
+        let valid_report = usize::from(actual_length) >= HID_BOOT_REPORT_BYTES;
+        if valid_report {
+            copy_from_dma(report_buffer, &mut report)?;
+        }
+        self.arm_hid_transfer()?;
+        if !valid_report {
+            return Err(XhciInitError::InvalidHidReport);
+        }
+        Ok(Some(HidReportCompletion {
+            slot_id: pending.slot_id,
+            endpoint_address,
+            actual_length,
+            report,
+        }))
     }
 
     fn address_first_connected_device(
@@ -984,7 +2134,40 @@ impl XhciController {
         self.info.addressed_slot = slot_id;
         self.info.addressed_speed_id = speed_id;
         self.first_device = Some(device);
-        Ok(())
+        self.enumerate_hid_keyboard(frame_allocator, physical_memory_offset)
+    }
+}
+
+/// Consume a bounded number of xHCI events and deliver newly pressed HID keys
+/// to the TTY. The controller lock is released before decoding or entering the
+/// TTY, so the runtime path cannot invert xHCI and terminal lock ordering.
+#[cfg(target_os = "none")]
+pub fn poll_hid_once() {
+    let result = {
+        let Some(controller) = XHCI_CONTROLLER.get() else {
+            return;
+        };
+        controller.lock().poll_hid_report()
+    };
+    let completion = match result {
+        Ok(Some(completion)) => completion,
+        Ok(None) => return,
+        Err(error) => {
+            crate::serial_println!("[xhci] HID polling disabled/ignored: {:?}", error);
+            return;
+        }
+    };
+
+    let decoded = HID_DECODER.lock().decode(completion.report);
+    for character in decoded.iter() {
+        crate::serial_println!(
+            "[xhci] HID report received: slot={}, endpoint=0x{:02X}, len={}, key={}",
+            completion.slot_id,
+            completion.endpoint_address,
+            completion.actual_length,
+            character,
+        );
+        crate::tty::TTY.lock().on_char(character);
     }
 }
 
@@ -1097,10 +2280,12 @@ pub fn init(
         event_ring_segment_table,
         scratchpad_array,
         scratchpad_storage,
+        context_size,
         command_enqueue_index: 0,
         command_cycle: true,
         event_dequeue_index: 0,
         event_cycle: true,
+        events: EventDispatchState::new(),
         first_device: None,
     };
     controller.submit_command(Trb::no_op_command())?;
@@ -1280,5 +2465,203 @@ mod tests {
             layout.port(0, PORTSC),
             Err(XhciInitError::InvalidCapabilities)
         );
+    }
+
+    #[test]
+    fn serializes_setup_packets_and_transfer_trbs() {
+        assert_eq!(core::mem::size_of::<UsbSetupPacket>(), 8);
+        let packet = UsbSetupPacket::new(0x80, 6, 0x0100, 0x0203, 18);
+        assert_eq!(packet.to_bytes(), [0x80, 6, 0, 1, 3, 2, 18, 0]);
+
+        let setup = Trb::setup_stage(packet, TransferDirection::In).with_cycle(true);
+        assert_eq!(setup.trb_type(), TRB_TYPE_SETUP_STAGE);
+        assert_ne!(setup.control & TRB_IMMEDIATE_DATA, 0);
+        assert_ne!(setup.control & TRB_CHAIN, 0);
+        assert_eq!(
+            (setup.control >> SETUP_TRANSFER_TYPE_SHIFT) & 0x3,
+            SETUP_TRANSFER_TYPE_IN
+        );
+        let data = Trb::data_stage(0x1234_5000, 18, TransferDirection::In);
+        assert_eq!(data.trb_type(), TRB_TYPE_DATA_STAGE);
+        assert_ne!(data.control & TRB_DIRECTION_IN, 0);
+        assert_ne!(data.control & TRB_INTERRUPT_ON_SHORT_PACKET, 0);
+        let status = Trb::status_stage(TransferDirection::Out);
+        assert_eq!(status.trb_type(), TRB_TYPE_STATUS_STAGE);
+        assert_ne!(status.control & TRB_INTERRUPT_ON_COMPLETION, 0);
+        let normal = Trb::normal(0x2234_5000, 8);
+        assert_eq!(normal.trb_type(), TRB_TYPE_NORMAL);
+        assert_ne!(normal.control & TRB_INTERRUPT_ON_COMPLETION, 0);
+    }
+
+    #[test]
+    fn reserves_transfer_ring_without_splitting_a_td() {
+        let mut cursor = RingCursor::new();
+        cursor.enqueue_index = COMMAND_RING_USABLE_TRBS - 3;
+        let reservation = cursor.reserve(3).unwrap();
+        assert_eq!(reservation.start_index, COMMAND_RING_USABLE_TRBS - 3);
+        assert!(reservation.reached_link);
+        assert_eq!(cursor.enqueue_index, 0);
+        assert!(!cursor.cycle);
+
+        cursor.enqueue_index = COMMAND_RING_USABLE_TRBS - 2;
+        assert_eq!(cursor.reserve(3), Err(XhciInitError::RingFull));
+        assert_eq!(cursor.enqueue_index, COMMAND_RING_USABLE_TRBS - 2);
+    }
+
+    #[test]
+    fn parses_device_and_hid_boot_keyboard_descriptors() {
+        let device = [
+            18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x27, 0x06, 0x01, 0x00, 0x00, 0x01, 1, 2, 3, 1,
+        ];
+        let parsed = parse_device_descriptor(&device, 3).unwrap();
+        assert_eq!(parsed.usb_version, 0x0200);
+        assert_eq!(parsed.max_packet_size_zero, 64);
+        assert_eq!(parsed.vendor_id, 0x0627);
+        assert_eq!(parsed.product_id, 0x0001);
+
+        let configuration = [
+            9, 2, 34, 0, 1, 1, 0, 0xA0, 50, // Configuration
+            9, 4, 0, 0, 1, 3, 1, 1, 0, // HID boot keyboard interface
+            9, 0x21, 0x11, 0x01, 0, 1, 0x22, 63, 0, // HID descriptor
+            7, 5, 0x81, 3, 8, 0, 10, // Interrupt IN endpoint
+        ];
+        assert_eq!(
+            parse_hid_keyboard_configuration(&configuration),
+            Ok(HidKeyboardDescriptor {
+                configuration_value: 1,
+                interface_number: 0,
+                endpoint_address: 0x81,
+                max_packet_size: 8,
+                interval: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_descriptor_walks() {
+        let mut configuration = [
+            9, 2, 25, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 1, 3, 1, 1, 0, 7, 5, 0x81, 3, 8, 0, 10,
+        ];
+        configuration[9] = 0;
+        assert_eq!(
+            parse_hid_keyboard_configuration(&configuration),
+            Err(XhciInitError::InvalidDescriptor)
+        );
+        configuration[9] = 1;
+        assert_eq!(
+            parse_hid_keyboard_configuration(&configuration),
+            Err(XhciInitError::InvalidDescriptor)
+        );
+        configuration[9] = 9;
+        configuration[2] = 26;
+        assert_eq!(
+            parse_hid_keyboard_configuration(&configuration),
+            Err(XhciInitError::InvalidDescriptor)
+        );
+    }
+
+    #[test]
+    fn calculates_endpoint_ids_and_intervals() {
+        assert_eq!(endpoint_id(0), Some(1));
+        assert_eq!(endpoint_id(0x01), Some(2));
+        assert_eq!(endpoint_id(0x81), Some(3));
+        assert_eq!(endpoint_id(0x8F), Some(31));
+        assert_eq!(interrupt_interval(1, 10), Some(6));
+        assert_eq!(interrupt_interval(2, 1), Some(3));
+        assert_eq!(interrupt_interval(3, 10), Some(9));
+        assert_eq!(interrupt_interval(3, 0), None);
+    }
+
+    #[test]
+    fn dispatches_interleaved_events_to_their_owner() {
+        let mut dispatch = EventDispatchState::new();
+        dispatch.command = Some(PendingCommand {
+            trb_pointer: 0x1000,
+            expected_slot: Some(2),
+            completion: None,
+        });
+        dispatch.transfer = Some(PendingTransfer {
+            owner: TransferOwner::Hid,
+            trb_pointer: 0x2000,
+            short_packet_pointer: None,
+            slot_id: 2,
+            endpoint_id: 3,
+            requested_length: 8,
+            completion: None,
+        });
+        dispatch.dispatch(Trb {
+            parameter: 5 << 24,
+            status: 0,
+            control: TRB_TYPE_PORT_STATUS_CHANGE_EVENT << TRB_TYPE_SHIFT,
+        });
+        dispatch.dispatch(Trb {
+            parameter: 0x2000,
+            status: u32::from(COMPLETION_CODE_SUCCESS) << 24,
+            control: (TRB_TYPE_TRANSFER_EVENT << TRB_TYPE_SHIFT) | (3 << 16) | (2 << 24),
+        });
+        dispatch.dispatch(Trb {
+            parameter: 0x1000,
+            status: u32::from(COMPLETION_CODE_SUCCESS) << 24,
+            control: (TRB_TYPE_COMMAND_COMPLETION_EVENT << TRB_TYPE_SHIFT) | (2 << 24),
+        });
+
+        assert_eq!(dispatch.changed_ports, 1 << 4);
+        assert!(dispatch.command.unwrap().completion.is_some());
+        assert!(dispatch.transfer.unwrap().completion.is_some());
+        assert_eq!(dispatch.unexpected_events, 0);
+    }
+
+    #[test]
+    fn rejects_completion_identity_mismatches() {
+        let mut dispatch = EventDispatchState::new();
+        dispatch.transfer = Some(PendingTransfer {
+            owner: TransferOwner::Control,
+            trb_pointer: 0x2000,
+            short_packet_pointer: Some(0x1FF0),
+            slot_id: 2,
+            endpoint_id: 1,
+            requested_length: 18,
+            completion: None,
+        });
+        dispatch.dispatch(Trb {
+            parameter: 0x2010,
+            status: u32::from(COMPLETION_CODE_SUCCESS) << 24,
+            control: (TRB_TYPE_TRANSFER_EVENT << TRB_TYPE_SHIFT) | (1 << 16) | (2 << 24),
+        });
+        assert!(dispatch.transfer.unwrap().completion.is_none());
+        assert_eq!(dispatch.unexpected_events, 1);
+
+        dispatch.dispatch(Trb {
+            parameter: 0x1FF0,
+            status: (u32::from(COMPLETION_CODE_SHORT_PACKET) << 24) | 2,
+            control: (TRB_TYPE_TRANSFER_EVENT << TRB_TYPE_SHIFT) | (1 << 16) | (2 << 24),
+        });
+        let completion = dispatch.transfer.unwrap().completion.unwrap();
+        assert_eq!(completion.completion_code(), COMPLETION_CODE_SHORT_PACKET);
+        assert_eq!(completion.transfer_length(), 2);
+    }
+
+    #[test]
+    fn decodes_only_new_hid_boot_key_presses() {
+        let mut decoder = HidKeyboardDecoder::new();
+        let mut report = [0u8; 8];
+        report[2] = 0x04;
+        assert_eq!(
+            decoder.decode(report).iter().collect::<std::vec::Vec<_>>(),
+            ['a']
+        );
+        assert_eq!(decoder.decode(report).len, 0);
+
+        report[0] = 0x02;
+        report[2] = 0x05;
+        report[3] = 0x28;
+        assert_eq!(
+            decoder.decode(report).iter().collect::<std::vec::Vec<_>>(),
+            ['B', '\n']
+        );
+        let previous = decoder.previous;
+        report[2] = 1;
+        assert_eq!(decoder.decode(report).len, 0);
+        assert_eq!(decoder.previous, previous);
     }
 }

@@ -737,7 +737,7 @@ pub trait Driver: Send + Sync {
 | Disk (virtio-blk) | ✅ Legacy | Polling PCI | Virtqueue por polling y DMA bajo 4 GiB |
 | Disk (USB) | 🔲 Pendiente | Polling | BOT/SCSI read-only diseñado en `USB_STORAGE.md` |
 | Network (virtio-net) | ✅ Base integrada | PCI | Discovery compartido + transporte legacy I/O |
-| USB/xHCI | 🔄 Enumeración base | Polling; MSI diseñado | Reset de host/puerto, Command/Event Rings, slot, contextos y Address Device sobre PCIe MMIO |
+| USB/xHCI | ✅ Teclado HID boot | Polling; MSI diseñado | EP0, descriptores, dispatcher único y endpoint interrupt IN → TTY sobre PCIe MMIO |
 | Bluetooth | 🔲 Futuro | — | Para mobile companion |
 
 ### 7.3 Inventario PCI
@@ -820,7 +820,7 @@ used. Un mutex por dispositivo serializa la virtqueue sin bloquear el inventario
 PCI. MSI/MSI-X, colas múltiples y el transporte virtio 1.0 moderno permanecen
 como incrementos posteriores.
 
-### 7.6 xHCI base
+### 7.6 xHCI y teclado HID
 
 `xhci.rs` descubre el host controller por clase PCI, mapea su BAR0 y valida el
 capability header, offsets operacionales/runtime/doorbell y tamaño de página.
@@ -832,20 +832,30 @@ por polling, sin habilitar MSI/MSI-X.
 Una sonda `No Op Command` comprueba en Q35 que el controlador consume el TRB
 publicado mediante su doorbell, produce un `Command Completion Event` exitoso
 y acepta el avance de ERDP. El productor del Command Ring y el consumidor del
-Event Ring mantienen índice y cycle bit. La ruta actual avanza eventos no
-relacionados mientras espera un comando, pero todavía no los conserva para su
-dueño; el despachador único que corrige ese límite está definido en
-[`ADR-006`](ADR/ADR-006-xhci-event-transfer-model.md).
+Event Ring mantienen índice y cycle bit. Un único dispatcher clasifica Command
+Completion, Transfer y Port Status Change Events, correlaciona puntero físico,
+Slot ID y DCI, y actualiza ERDP una sola vez. El estado fijo admite un comando
+y una transferencia pendientes, registra cambios de puerto y conserva el
+ownership formalizado en [`ADR-006`](ADR/ADR-006-xhci-event-transfer-model.md).
 
 Las Extended Capabilities `Supported Protocol` describen qué puertos pertenecen
 a USB 2 o USB 3 y qué Slot Type usar. El primer puerto conectado se resetea por
 `PORTSC`; después `Enable Slot` devuelve el Slot ID y el kernel crea Device
 Context, Input Context y el Transfer Ring de EP0 según `HCCPARAMS1.CSZ`. Tras
-publicar el Device Context en DCBAA, `Address Device` completa la primera
-enumeración real de un teclado `usb-kbd` en Q35. Siguen pendientes las
-transferencias de control, los descriptores USB/HID y el endpoint interrupt IN.
-El diseño ejecutable del siguiente corte está en
-[`USB_XHCI.md`](USB_XHCI.md).
+publicar el Device Context en DCBAA, `Address Device` completa el direccionado
+del `usb-kbd` en Q35. Después, EP0 ejecuta TD de Setup/Data/Status para leer y
+validar los descriptores Device y Configuration, selecciona exclusivamente una
+interfaz HID boot keyboard y completa `SET_CONFIGURATION` y `SET_PROTOCOL`.
+
+El endpoint interrupt IN se deriva del descriptor, se convierte a DCI sin
+codificar `0x81`, recibe un Transfer Ring y un buffer DMA persistentes y se
+habilita mediante `Configure Endpoint`. Sólo existe un reporte pendiente; cada
+completion válida copia ocho bytes, rearma el endpoint y libera el lock xHCI
+antes de decodificar nuevas pulsaciones US o entrar en la TTY. El loop de
+`brsh` llama al polling una vez después de cada `hlt`, por lo que no mantiene un
+busy-wait continuo. `make usb-hid-test` demuestra la ruta QMP → `usb-kbd` →
+xHCI → TTY con 1 y 4 vCPU. Hubs, ratón, hotplug y MSI/MSI-X siguen fuera de la
+baseline; la especificación y evidencia están en [`USB_XHCI.md`](USB_XHCI.md).
 
 ### 7.7 USB Mass Storage objetivo
 
@@ -1053,7 +1063,7 @@ Ver carpeta [`docs/ADR/`](ADR/) para decisiones formales.
 | [ADR-003](ADR/ADR-003-syscall-abi.md) | ABI mínima de syscalls x86_64 | ✅ Baseline v0.1 |
 | [ADR-004](ADR/ADR-004-ipc-message-passing.md) | IPC por message passing acotado | ✅ Baseline v0.1 |
 | [ADR-005](ADR/ADR-005-virtual-memory.md) | Memoria virtual y asignación física | ✅ Baseline v0.1 |
-| [ADR-006](ADR/ADR-006-xhci-event-transfer-model.md) | Modelo de eventos y transferencias xHCI | 📝 Propuesta Fase 13 |
+| [ADR-006](ADR/ADR-006-xhci-event-transfer-model.md) | Modelo de eventos y transferencias xHCI | ✅ Baseline v0.1 |
 | [ADR-007](ADR/ADR-007-pci-interrupt-delivery.md) | Entrega MSI/MSI-X y trabajo diferido | 📝 Propuesta Fase 13 |
 | [ADR-008](ADR/ADR-008-syscall-mediation.md) | Mediación de syscalls y memoria de usuario | 📝 Propuesta Fase 14 |
 | [ADR-009](ADR/ADR-009-ipc-endpoints-wait-queues.md) | Endpoints IPC autenticados y wait queues | 📝 Propuesta Fase 14 |
@@ -1065,21 +1075,19 @@ Ver carpeta [`docs/ADR/`](ADR/) para decisiones formales.
 
 ## 13. Próximos pasos de implementación
 
-1. Completar control transfers xHCI, descriptores USB/HID y endpoint interrupt
-   IN para el teclado conectado en Q35.
-2. Integrar USB mass storage con la block layer y mantener FAT32 read-only como
+1. Integrar USB mass storage con la block layer y mantener FAT32 read-only como
    primer consumidor.
-3. Activar MSI-X/MSI para xHCI conservando el dispatcher y fallback polling.
-4. Implementar la matriz syscall → capability → audit event y la copia segura
+2. Activar MSI-X/MSI para xHCI conservando el dispatcher y fallback polling.
+3. Implementar la matriz syscall → capability → audit event y la copia segura
    de buffers ring 3 definida en `SYSCALL_SECURITY.md`.
-5. Conectar las syscalls IPC al core con endpoints, sender y wait queues de
+4. Conectar las syscalls IPC al core con endpoints, sender y wait queues de
    `IPC_RUNTIME.md`.
-6. Arrancar audit, identity, policy y capability broker como procesos ring 3,
+5. Arrancar audit, identity, policy y capability broker como procesos ring 3,
    con roles bootstrap y fallo cerrado conforme a `SECURITY_SERVICES.md`.
-7. Extraer orchestrator/model de IA a ring 3, primero en `ObserveOnly`, según
+6. Extraer orchestrator/model de IA a ring 3, primero en `ObserveOnly`, según
    `AI_RUNTIME.md`.
-8. Añadir storage durable/trusted time e implementar `.bpkg`, metadata y
+7. Añadir storage durable/trusted time e implementar `.bpkg`, metadata y
    activation transaccional según `PACKAGE_MANAGER.md`.
-9. Completar la matriz de hardware físico y el gate de release v1.0.
+8. Completar la matriz de hardware físico y el gate de release v1.0.
 
 El orden ejecutivo y los criterios de salida se mantienen en `ROADMAP.md`.

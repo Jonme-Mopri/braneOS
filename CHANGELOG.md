@@ -56,6 +56,10 @@ All notable changes to Brane OS are documented here. The project follows
 - xHCI host initialization with scratchpads, DCBAA, persistent command/event
   rings, Supported Protocol discovery and root-port reset. The Q35 test attaches
   a USB keyboard and verifies Enable Slot plus Address Device using DMA contexts.
+- A single-owner xHCI Event Ring dispatcher, synchronous EP0 control transfers,
+  defensive USB descriptor parsing, HID boot protocol setup and a continuously
+  rearmed interrupt IN endpoint. QMP tests prove key delivery to the TTY with
+  both 1 and 4 vCPUs while retaining the virtio-blk/FAT32 path.
 
 ## 0.1.0 — Foundation
 
@@ -72,7 +76,8 @@ All notable changes to Brane OS are documented here. The project follows
 
 - Live migration of a context that has already run remains disabled; tasks may
   be balanced before dispatch or pinned by affinity.
-- USB HID transfers, USB mass storage and modern virtio PCI transport remain
-  planned for Phase 13; xHCI currently addresses the first device by polling.
+- USB mass storage, MSI/MSI-X, hotplug, hubs, mice and modern virtio PCI
+  transport remain planned for Phase 13; xHCI currently supports one HID boot
+  keyboard through bounded polling.
 - FAT32 is read-only and supports 8.3 names; LFN and write operations remain
   unimplemented.

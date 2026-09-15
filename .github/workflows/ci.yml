@@ -10,10 +10,11 @@
 #   5. Deterministic stress and mutation-fuzz tests
 #   6. Release artifact — ISO packaging, checksum and CD boot
 #   7. Boot test — QEMU serial output verification (60 s timeout)
-#   8. ACPI S3 test — suspend, QMP wake and post-resume shell
-#   9. Security tests — capability denial and privilege escalation
-#  10. Integration tests — syscalls/services and capability broker
-#  11. E2E tests — shell readiness and complete boot sequence
+#   8. PCIe/USB tests — ECAM plus HID key delivery on 1/4 vCPU
+#   9. ACPI S3 test — suspend, QMP wake and post-resume shell
+#  10. Security tests — capability denial and privilege escalation
+#  11. Integration tests — syscalls/services and capability broker
+#  12. E2E tests — shell readiness and complete boot sequence
 # ============================================================
 
 name: CI
@@ -282,6 +283,10 @@ jobs:
           - name: PCIe ECAM Test (Q35)
             suite: pcie
             target: pcie-test
+            boot_timeout: "60"
+          - name: USB HID Test (Q35/QMP)
+            suite: usb-hid
+            target: usb-hid-test
             boot_timeout: "60"
           - name: ACPI S3 Test (QEMU)
             suite: acpi

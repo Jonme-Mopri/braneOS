@@ -20,9 +20,10 @@ The logo represents interconnected membranes forming a single adaptive system. B
 |--------|---------|--------------|------------------|
 | Phase 13 · Hardware I/O | `v0.1.0` | `x86_64` | Rust |
 
-Current milestone: virtio-blk and read-only FAT32 are operational; xHCI resets
-and addresses a USB keyboard in Q35. USB control transfers and HID interrupt
-reports are the next implementation cut. Physical hardware validation and the
+Current milestone: virtio-blk and read-only FAT32 are operational; xHCI now
+enumerates a real USB boot keyboard, configures its interrupt IN endpoint and
+delivers QMP-injected keys to the TTY in Q35 with 1 and 4 vCPUs. USB Mass
+Storage is the next implementation cut. Physical hardware validation and the
 v1.0 tag are still release gates.
 
 ---

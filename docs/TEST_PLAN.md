@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §18.  
 > Estado: **Activo**.  
-> Última actualización: **2026-09-12**
+> Última actualización: **2026-09-15**
 
 ---
 
@@ -33,8 +33,10 @@ Brane OS utiliza una estrategia de testing multinivel que cubre desde unidades a
   legacy, incluidas cadenas de descriptores de lectura y escritura.
 - FAT32 read-only sobre superfloppy y partición MBR: validación del BPB,
   directorios anidados 8.3, resolución case-insensitive, offsets y cadenas FAT.
-- xHCI: capability/register layout, Supported Protocol/PORTSC, scratchpads,
-  selección de página, TRB Link, ERST y codificación Enable Slot/Address Device.
+- xHCI/USB HID: capability/register layout, Supported Protocol/PORTSC,
+  scratchpads, TRB de comando/control/normal, ring/cycle, dispatcher y
+  correlación de eventos, parsers defensivos Device/Configuration/HID,
+  DCI/interval y decoder boot keyboard.
 
 **Herramientas:** `cargo test`, test modules en Rust (`#[cfg(test)]`).
 
@@ -79,6 +81,8 @@ modelo, telemetry gaps y leases single-use se detallan en
 - FAT32 monta el disco de prueba en `/disk` y lee `README.TXT` mediante el VFS.
 - La inicialización de subsistemas ocurre en orden correcto.
 - El proceso init se crea exitosamente.
+- Q35 enumera el `usb-kbd`, configura `0x81` y entrega una tecla QMP a la TTY
+  mediante un Transfer Event xHCI con 1 y 4 vCPU.
 
 **Herramientas:** Scripts Python + QEMU con timeout, análisis de salida serial.
 
@@ -142,7 +146,8 @@ exactamente una lease ligada a la propuesta.
 con cargas grandes y reproducibles.
 
 **Cobertura:**
-- 25 000 entradas binarias mutadas sobre parsers FAT32, BDP y Brane Session.
+- 25 000 entradas binarias mutadas sobre parsers FAT32, BDP, Brane Session y
+  descriptores USB/HID.
 - 10 000 roundtrips de paquetes válidos Brane Session y BDP.
 - 50 000 operaciones del frame allocator contrastadas con un modelo de referencia.
 - 256 ciclos de saturación, backpressure, drenaje FIFO y wraparound de IPC.
@@ -174,11 +179,12 @@ GitHub Actions valida en cada `push` y `pull_request` hacia `main`:
 | Formatting | Activo | `cargo fmt --all -- --check` |
 | Clippy | Activo | Kernel bare-metal + runner host con `-D warnings` |
 | Kernel unit tests | Activo | `cargo test -p brane_os_kernel --lib` |
-| **Storage host** | **Activo** | xHCI, MCFG/ECAM, PCI, block, DMA, virtqueue y FAT32 MBR/superfloppy/directorios/cadenas (157 tests totales) |
+| **Storage/USB host** | **Activo** | xHCI USB/HID, MCFG/ECAM, PCI, block, DMA, virtqueue y FAT32 MBR/superfloppy/directorios/cadenas (165 tests totales) |
 | **Stress y mutation-fuzz** | **Activo** | `make stress-test` (parsers, allocator, IPC y dispatcher SMP concurrente) |
 | **Release artifact (ISO UEFI)** | **Activo** | `make iso-test VERSION=ci` (ISO, checksum y boot con OVMF) |
 | **Boot test (QEMU)** | **Activo** | Kernel release + FAT32 virtio legacy read-only; exige LBA0, montaje `/disk` y lectura VFS real |
-| **PCIe ECAM test (Q35)** | **Activo** | `make pcie-test` exige MCFG/ECAM, virtio-blk/FAT32 y un `usb-kbd` reseteado, asignado a slot y direccionado por xHCI |
+| **PCIe ECAM test (Q35)** | **Activo** | `make pcie-test` exige MCFG/ECAM, virtio-blk/FAT32 y enumeración/configuración del `usb-kbd` por xHCI |
+| **USB HID test (Q35/QMP)** | **Activo** | `make usb-hid-test` inyecta `u`, exige Transfer Event propio y entrega TTY con 1 y 4 vCPU |
 | **SMP/AP startup test (QEMU)** | **Activo** | `make smp-test` (4 vCPU, INIT/SIPI, estado per-CPU, 8 rondas acotadas y workers reales en CPU1–CPU3) |
 | **SMP run-queue + dispatcher model (host)** | **Activo** | `cargo test -p brane_os_kernel --lib sched::multicore_tests` (balanceo, steal, ownership y retorno al idle entre quanta) |
 | **SMP per-CPU timer state (host)** | **Activo** | `cargo test -p brane_os_kernel --lib cpu_local_scheduler_tracks_timer_without_touching_bsp` (slot, ticks y aislamiento del cursor BSP) |
@@ -223,9 +229,9 @@ La validación local equivalente recomendada está documentada en
 14. ~~Fase 13: sondear tamaños de BAR, mapear apertures MMIO y comenzar xHCI.~~ ✅ **Completado** (150 tests + Q35/ECAM + BAR0 MMIO + capability header xHCI)
 15. ~~Fase 13: reset controlado de xHCI y estructuras DMA para command/event rings.~~ ✅ **Completado** (153 tests + Q35 reset/running + No Op Command Completion sobre DMA)
 16. ~~Fase 13: Supported Protocol/PORTSC y ciclo Enable Slot/Address Device.~~ ✅ **Completado** (157 tests + teclado Q35 conectado, reset de puerto, slot/contextos y Address Device)
-17. Fase 13: transferencias de control, descriptores USB/HID y endpoint
-    interrupt IN; diseño y criterio de salida en
-    [`USB_XHCI.md`](USB_XHCI.md).
+17. ~~Fase 13: transferencias de control, descriptores USB/HID y endpoint
+    interrupt IN.~~ ✅ **Completado** (165 tests/fuzz + Device/Configuration/
+    HID reales + QMP → Transfer Event → TTY en Q35 con 1/4 vCPU)
 18. Fase 13: USB Mass Storage Bulk-Only, perfil SCSI read-only, registro como
     `BlockDevice` y montaje FAT32; depende del corte HID y se especifica en
     [`USB_STORAGE.md`](USB_STORAGE.md).
@@ -259,10 +265,11 @@ La validación local equivalente recomendada está documentada en
 | `make test-image` | Compila una imagen compartida con el kernel release |
 | `make boot-test` | Boot test del kernel release en QEMU/TCG (60 s) |
 | `make pcie-test` | Boot Q35; valida ACPI MCFG, PCIe ECAM y storage real |
+| `make usb-hid-test` | Q35/QMP con 1/4 vCPU; valida descriptor, endpoint interrupt IN y TTY |
 | `make smp-test` | Boot con 4 vCPU, hand-off real y ejecución verificada en cada AP |
 | `make acpi-test` | S3, shell post-resume y `yield` aislado del BSP en QEMU/QMP (120 s) |
 | `make security-test` | Security tests en QEMU |
 | `make integration-test` | Integration tests en QEMU |
 | `make e2e-test` | E2E tests en QEMU |
-| `make test-all` | Suite completa (unit → stress/fuzz → boot/PCIe → SMP → ACPI → security → integration → e2e) |
+| `make test-all` | Suite completa (unit → stress/fuzz → boot/PCIe/USB → SMP → ACPI → security → integration → e2e) |
 | `make docs` | Genera API docs con `cargo doc` |

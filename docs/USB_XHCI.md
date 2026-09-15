@@ -1,8 +1,8 @@
-# USB HID sobre xHCI — especificación de implementación
+# USB HID sobre xHCI — implementación y evidencia
 
 > Fase: **13 — Hardware I/O y almacenamiento**.
-> Estado: **diseño del octavo corte; implementación pendiente**.
-> Última actualización: **2026-09-12**.
+> Estado: **octavo corte implementado y validado en QEMU/Q35**.
+> Última actualización: **2026-09-15**.
 
 ## 1. Objetivo
 
@@ -18,6 +18,10 @@ root port → slot/addressed device → EP0 control transfers
 El criterio de este corte no es sólo detectar el dispositivo. Debe leer y
 validar descriptores reales, configurar el endpoint anunciado por el teclado,
 recibir reportes de ocho bytes y demostrar entrada desde QEMU hasta `brsh`.
+
+**Resultado:** la ruta completa está operativa. `make usb-hid-test` inyecta la
+tecla `u` por QMP y exige que el endpoint `0x81` produzca un Transfer Event que
+llegue a la TTY, tanto con 1 como con 4 vCPU.
 
 ## 2. Baseline disponible
 
@@ -45,14 +49,10 @@ La prueba `make pcie-test` conecta `qemu-xhci` y `usb-kbd`, y exige:
 
 ### Límites actuales
 
-- Sólo se conserva el primer dispositivo conectado.
-- EP0 tiene memoria DMA, pero no índices/cycle state propios en
-  `XhciDevice` ni una API para transferencias.
-- El consumidor de eventos espera Command Completion y descarta otros tipos.
-- No existen Setup/Data/Status/Normal TRB ni Transfer Event.
-- No se leen Device, Configuration, Interface, HID o Endpoint descriptors.
-- No se ejecutan `SET_CONFIGURATION` ni `SET_PROTOCOL`.
-- No existe endpoint interrupt IN, decoder HID, hotplug o desconexión.
+- Sólo se conserva el primer dispositivo y una transferencia por endpoint.
+- Se aceptan teclados HID boot; no se interpreta un Report Descriptor genérico.
+- Los cambios de puerto se registran y un disconnect detiene el rearme, pero no
+  existen teardown, reclaim DMA ni hotplug completo.
 - El controlador opera por polling; MSI/MSI-X sigue fuera de este corte.
 
 ## 3. Alcance y exclusiones
@@ -134,7 +134,7 @@ El ownership, los límites de concurrencia y la transición desde el consumidor
 actual se formalizan en
 [`ADR-006`](ADR/ADR-006-xhci-event-transfer-model.md).
 
-## 5. Octavo corte por incrementos
+## 5. Octavo corte implementado
 
 ### 5.1 Transfer engine de EP0
 
@@ -308,17 +308,21 @@ positivo.
 Ejecutar la misma ruta con 1 y 4 vCPU para detectar ownership o locks asumidos
 implícitamente por CPU0.
 
-## 9. Criterio de salida
+## 9. Criterio de salida y evidencia
 
-El octavo corte se considera terminado cuando:
+El octavo corte se considera terminado porque:
 
-- unit tests, mutation-fuzz y Clippy pasan;
-- Q35 lee descriptores reales del `usb-kbd`;
+- 165 unit tests cubren setup packets, TRB, wrap/cycle, correlación, parsers,
+  interval/DCI, eventos intercalados y el decoder HID;
+- mutation-fuzz incluye los parsers Device y Configuration/HID;
+- Q35 lee el descriptor real `VID=0627/PID=0001` del `usb-kbd`;
 - `SET_CONFIGURATION`, `SET_PROTOCOL` y `Configure Endpoint` completan;
-- un reporte interrupt IN llega al driver y genera el carácter esperado en TTY;
-- no se pierden eventos intercalados ni se rompe virtio-blk/FAT32;
-- `make test-all` conserva boot legacy, SMP, ACPI, security, integration y E2E;
-- roadmap, arquitectura, runbook, test plan y changelog incluyen la evidencia.
+- un reporte interrupt IN del endpoint `0x81` genera `key=u` en la TTY;
+- la misma aceptación pasa con 1 y 4 vCPU sin romper virtio-blk/FAT32;
+- `make test-all` conserva boot legacy, SMP, ACPI S3, security, integration y
+  E2E sin regresiones;
+- roadmap, arquitectura, runbook, test plan, ADR y changelog registran la
+  evidencia reproducible.
 
 ## 10. Referencias normativas
 

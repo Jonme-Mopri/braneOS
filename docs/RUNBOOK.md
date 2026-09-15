@@ -1,6 +1,6 @@
 # RUNBOOK.md - Build, CI y ejecucion local
 
-> Estado: operativo para desarrollo local. Última actualización: 2026-09-12.
+> Estado: operativo para desarrollo local. Última actualización: 2026-09-15.
 > Este documento describe el flujo
 > actual del repositorio, no el release final instalable.
 
@@ -20,6 +20,7 @@ El arranque actual inicializa:
 - syscalls e IPC,
 - capacidades, auditoria y loader de modulos,
 - inventario PCI, block layer, virtio-blk legacy y FAT32 read-only en `/disk`,
+- xHCI con transferencias EP0 y teclado HID boot conectado a la TTY,
 - Brane Protocol, IA observadora, VFS, RamFS, TTY, shell, red, sockets y DNS.
 
 El sistema entra en `brsh` y queda esperando entrada por TTY.
@@ -53,9 +54,10 @@ volumen en `/disk` y lee `README.TXT` mediante el VFS antes de iniciar `brsh`.
 legacy con la máquina QEMU predeterminada. La variante Q35 también conecta un
 host `qemu-xhci`, ejecuta su reset, configura DCBAA y Command/Event Rings y
 exige completar una sonda `No Op` por DMA antes de continuar el boot. También
-conecta `usb-kbd`, resetea su root port, reserva slot/contextos y exige que
-`Address Device` termine correctamente; la lectura de reportes HID todavía no
-forma parte de este corte.
+conecta `usb-kbd`, resetea su root port, reserva slot/contextos, lee sus
+descriptores, completa `SET_CONFIGURATION`/`SET_PROTOCOL` y configura el
+endpoint interrupt IN. `make usb-hid-test` añade QMP, inyecta `u` después del
+prompt y exige el marcador propio del Transfer Event con 1 y 4 vCPU.
 
 ---
 
@@ -191,21 +193,27 @@ make release-test VERSION=dev
 - runner host con `-D warnings`.
 
 `make test-all` ejecuta unit, stress/mutation-fuzz, boot legacy, PCIe ECAM, SMP,
-ACPI S3, security, integration y E2E. Los targets QEMU comparten una imagen del kernel release —el
+USB HID con 1/4 vCPU, ACPI S3, security, integration y E2E. Los targets QEMU comparten una imagen del kernel release —el
 ELF debug excede el timeout de carga del bootloader BIOS bajo TCG— y detectan el
 prompt `brane>` aunque no termine con salto de línea.
 
 `make release-test` valida además los artefactos versionados y arranca la ISO
 UEFI con OVMF.
 
-Los targets `boot-test`, `pcie-test`, `smp-test` e `iso-test` crean un disco FAT32 temporal
+Los targets `boot-test`, `pcie-test`, `usb-hid-test`, `smp-test` e `iso-test` crean un disco FAT32 temporal
 independiente del medio de arranque y fuerzan `disable-modern=on`. Además del
 prompt, exigen el registro de `virtio-blk0`, una transferencia DMA, el montaje
 en `/disk` y la lectura del archivo de prueba mediante el VFS.
 
 `make stress-test` usa semillas fijas para mutar los parsers FAT32, BDP y Brane
-Session, comparar el frame allocator con un modelo de referencia y saturar las
-colas IPC. No requiere QEMU y sus fallos son reproducibles.
+Session, además de los descriptores USB/HID; también compara el frame allocator
+con un modelo de referencia y satura las colas IPC. No requiere QEMU y sus
+fallos son reproducibles.
+
+`make usb-hid-test` requiere que QEMU pueda crear un socket Unix QMP. El harness
+espera `brane>`, inyecta `sendkey u` y sólo acepta el test si aparece
+`[xhci] HID report received: ... key=u`; una entrada PS/2 no puede producir ese
+marcador y, por tanto, no causa un falso positivo.
 
 El test ACPI controla QEMU mediante QMP: ordena `suspend` desde `brsh`, espera
 los eventos `SUSPEND` y `WAKEUP`, envía `system_wakeup` y confirma que el shell
@@ -232,6 +240,7 @@ Jobs actuales:
 | Release Artifact (ISO) | `make iso-test VERSION=ci` |
 | Boot Test (QEMU) | `python3 tests/boot/test_boot.py` |
 | PCIe ECAM Test (Q35) | `make pcie-test` |
+| USB HID Test (Q35/QMP) | `make usb-hid-test` |
 | ACPI S3 Test (QEMU/QMP) | `make acpi-test` |
 | Security Tests (QEMU) | `make security-test` |
 | Integration Tests (QEMU) | `make integration-test` |
@@ -255,9 +264,9 @@ Antes de publicar v1.0 quedan dos gates deliberadamente manuales:
    crear el tag versionado.
 
 QEMU cubre BIOS/UEFI de forma automatizada, pero no sustituye la validación
-física. USB HID tampoco se considera completo: Q35 llega hasta `Address Device`
-y todavía faltan control transfers, descriptores HID y reportes interrupt IN.
-USB Mass Storage continúa como diseño posterior, documentado en
+física. USB HID está completo para la baseline de un teclado boot sin hubs:
+Q35 valida control transfers, descriptores, Configure Endpoint y reportes
+interrupt IN con 1/4 vCPU. USB Mass Storage continúa como diseño posterior, documentado en
 [`USB_STORAGE.md`](USB_STORAGE.md); todavía no existe un target ejecutable para
 esa ruta.
 MSI/MSI-X también permanece sin implementar: xHCI y virtio-blk progresan por

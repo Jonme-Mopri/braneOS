@@ -773,7 +773,7 @@ A partir de este documento se deberán crear y mantener:
 - [x] `RUNBOOK.md`
 - [x] `RELEASE.md`
 - [x] `HARDWARE_MATRIX.md`
-- [x] `USB_XHCI.md` (diseño del octavo corte de la Fase 13)
+- [x] `USB_XHCI.md` (implementación y evidencia del octavo corte de la Fase 13)
 - [x] `USB_STORAGE.md` (diseño del noveno corte de la Fase 13)
 - [x] `PCI_INTERRUPTS.md` (diseño del décimo corte de la Fase 13)
 - [x] `SYSCALL_SECURITY.md` (prerrequisito de aislamiento de la Fase 14)

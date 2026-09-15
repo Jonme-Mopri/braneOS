@@ -19,8 +19,10 @@ Environment variables:
 """
 
 import argparse
+import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -141,6 +143,48 @@ def warn(msg: str) -> None:
 
 def error(msg: str) -> None:
     print(f"[boot-test] \033[31mFAIL\033[0m  {msg}", flush=True)
+
+
+class QmpClient:
+    """Minimal line-oriented QMP client used for deterministic key injection."""
+
+    def __init__(self, path: Path, deadline: float) -> None:
+        self.connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        while True:
+            try:
+                self.connection.connect(str(path))
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("QMP socket did not become ready")
+                time.sleep(0.02)
+        self.stream = self.connection.makefile("rwb", buffering=0)
+        self._read_response(deadline)
+        self.execute("qmp_capabilities", deadline=deadline)
+
+    def _read_response(self, deadline: float) -> dict:
+        self.connection.settimeout(max(0.01, deadline - time.monotonic()))
+        while True:
+            line = self.stream.readline()
+            if not line:
+                raise RuntimeError("QMP connection closed")
+            message = json.loads(line)
+            if "event" not in message:
+                return message
+
+    def execute(self, command: str, arguments: dict | None = None, *, deadline: float) -> dict:
+        request: dict[str, object] = {"execute": command}
+        if arguments:
+            request["arguments"] = arguments
+        self.stream.write(json.dumps(request).encode() + b"\r\n")
+        response = self._read_response(deadline)
+        if "error" in response:
+            raise RuntimeError(f"QMP command {command!r} failed: {response['error']}")
+        return response
+
+    def close(self) -> None:
+        self.stream.close()
+        self.connection.close()
 
 
 def write_fat32_test_disk(disk: BinaryIO) -> None:
@@ -314,6 +358,7 @@ def run_qemu_test(
     media_type: str = "disk",
     cpus: int = 1,
     machine: str | None = None,
+    usb_hid: bool = False,
 ) -> int:
     """
     Launch QEMU with the given disk image or ISO, capture serial output,
@@ -331,7 +376,13 @@ def run_qemu_test(
             "[xhci] Runtime ready: reset=ok, running=true, command_probe=ok",
             "[xhci] Ports ready: protocols=2, connected=1",
             "[xhci] Device addressed: slot=1",
+            "[xhci] Device descriptor: vid=0x0627, pid=0x0001",
+            "[xhci] HID keyboard ready: slot=1, interface=0, endpoint=0x81",
         ])
+    if usb_hid:
+        required_strings.append(
+            "[xhci] HID report received: slot=1, endpoint=0x81, len=8, key=u"
+        )
     if cpus > 1:
         required_strings.extend([
             f"[smp] CPU boot plan ready: {cpus} enabled CPU(s)",
@@ -344,6 +395,8 @@ def run_qemu_test(
         ])
     firmware_vars: Path | None = None
     block_path: Path | None = None
+    qmp_tempdir = None
+    qmp_path: Path | None = None
     if media_type == "iso":
         ovmf = find_ovmf()
         if ovmf is None:
@@ -376,6 +429,11 @@ def run_qemu_test(
             "-device", "qemu-xhci,id=branexhci",
             "-device", "usb-kbd,bus=branexhci.0",
         ])
+    if usb_hid:
+        # Keep the AF_UNIX path below macOS' short sockaddr_un limit.
+        qmp_tempdir = tempfile.TemporaryDirectory(prefix="bhid-", dir="/tmp")
+        qmp_path = Path(qmp_tempdir.name) / "qmp.sock"
+        cmd.extend(["-qmp", f"unix:{qmp_path},server=on,wait=off"])
     cmd.extend([
         "-serial", "stdio",
         "-nographic",         # no display window — pure serial I/O
@@ -390,6 +448,7 @@ def run_qemu_test(
     failed_reason: list[str] = []
     output_lines: list[str] = []
     done_event = threading.Event()
+    shell_ready = threading.Event()
 
     try:
         proc = subprocess.Popen(
@@ -405,6 +464,8 @@ def run_qemu_test(
             firmware_vars.unlink(missing_ok=True)
         if block_path:
             block_path.unlink(missing_ok=True)
+        if qmp_tempdir:
+            qmp_tempdir.cleanup()
         return 2
 
     def reader():
@@ -430,6 +491,9 @@ def run_qemu_test(
                     if req not in found and req in scan_window:
                         found.add(req)
                         ok(f"Found required string: {req!r}")
+
+                if "brane>" in scan_window:
+                    shell_ready.set()
 
                 for bad in FAIL_STRINGS:
                     if bad in scan_window:
@@ -457,6 +521,31 @@ def run_qemu_test(
     t = threading.Thread(target=reader, daemon=True)
     t.start()
 
+    def inject_usb_key() -> None:
+        if not usb_hid or qmp_path is None:
+            return
+        deadline = time.monotonic() + timeout
+        client = None
+        try:
+            if not shell_ready.wait(timeout=max(0.1, deadline - time.monotonic())):
+                raise TimeoutError("shell prompt did not appear before USB HID injection")
+            client = QmpClient(qmp_path, deadline)
+            client.execute(
+                "human-monitor-command",
+                {"command-line": "sendkey u"},
+                deadline=deadline,
+            )
+            info("Injected key 'u' through QMP; awaiting the xHCI HID marker.")
+        except Exception as exc:
+            failed_reason.append(f"USB HID key injection failed: {exc}")
+            done_event.set()
+        finally:
+            if client is not None:
+                client.close()
+
+    injector = threading.Thread(target=inject_usb_key, daemon=True)
+    injector.start()
+
     # Wait for success signal or timeout
     triggered = done_event.wait(timeout=timeout)
 
@@ -468,10 +557,13 @@ def run_qemu_test(
         proc.kill()
 
     t.join(timeout=3)
+    injector.join(timeout=3)
     if firmware_vars:
         firmware_vars.unlink(missing_ok=True)
     if block_path:
         block_path.unlink(missing_ok=True)
+    if qmp_tempdir:
+        qmp_tempdir.cleanup()
 
     # ── Evaluate result ──────────────────────────────────────────────────
     print()
@@ -509,6 +601,8 @@ def parse_args() -> argparse.Namespace:
                    help="Number of virtual CPUs for QEMU (default: 1)")
     p.add_argument("--machine", choices=("pc", "q35"), default=None,
                    help="QEMU machine type; q35 validates the PCIe ECAM path")
+    p.add_argument("--usb-hid", action="store_true",
+                   help="Inject a key over QMP and require the xHCI HID/TTY path")
     media = p.add_mutually_exclusive_group()
     media.add_argument("--img", type=str, default=None,
                        help="Path to existing .img file, skips build entirely")
@@ -522,6 +616,9 @@ def main() -> None:
     args = parse_args()
     if not 1 <= args.cpus <= 32:
         error("--cpus must be between 1 and 32")
+        sys.exit(2)
+    if args.usb_hid and args.machine != "q35":
+        error("--usb-hid requires --machine q35")
         sys.exit(2)
     start = time.monotonic()
 
@@ -547,7 +644,14 @@ def main() -> None:
         kernel_path = build_kernel()
         img_path = build_disk_image(kernel_path)
 
-    rc = run_qemu_test(img_path, args.timeout, media_type, args.cpus, args.machine)
+    rc = run_qemu_test(
+        img_path,
+        args.timeout,
+        media_type,
+        args.cpus,
+        args.machine,
+        args.usb_hid,
+    )
 
     elapsed = time.monotonic() - start
     info(f"Total elapsed: {elapsed:.1f}s")

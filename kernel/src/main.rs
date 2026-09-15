@@ -746,6 +746,25 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                     controller.addressed_speed_id,
                 );
             }
+            if controller.device_configurations != 0 {
+                serial_println!(
+                    "[xhci] Device descriptor: vid=0x{:04X}, pid=0x{:04X}, configurations={}",
+                    controller.device_vendor_id,
+                    controller.device_product_id,
+                    controller.device_configurations,
+                );
+            }
+            if controller.hid_keyboard_ready {
+                serial_println!(
+                    "[xhci] HID keyboard ready: slot={}, interface={}, endpoint=0x{:02X}, dci={}, packet={}, interval={}",
+                    controller.addressed_slot,
+                    controller.hid_interface,
+                    controller.hid_endpoint_address,
+                    controller.hid_endpoint_dci,
+                    controller.hid_max_packet_size,
+                    controller.hid_interval,
+                );
+            }
         }
         Ok(None) => {
             serial_println!("[xhci] No xHCI controller found.");
@@ -898,6 +917,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Shell loop: wait for keyboard input, process commands
     loop {
         x86_64::instructions::hlt(); // Wait for interrupt
+        xhci::poll_hid_once();
 
         // Check if a line is ready
         let mut tty_guard = tty::TTY.lock();

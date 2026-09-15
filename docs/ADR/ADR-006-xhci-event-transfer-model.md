@@ -1,6 +1,6 @@
 # ADR-006: Modelo de eventos y transferencias xHCI
 
-**Estado:** Propuesta para el octavo corte de la Fase 13
+**Estado:** Aceptada para v0.1
 **Fecha:** 2026-09-09
 **Autores:** Brane OS Team
 
@@ -169,8 +169,12 @@ condición normal.
 - Entrada QMP que llega por `usb-kbd` a la TTY con 1 y 4 vCPU.
 - Regresión completa de virtio-blk/FAT32 y del boot sin dispositivo USB.
 
-Cuando esa evidencia exista, el estado cambiará a **Aceptada para v0.1** y los
-límites que permanezcan se registrarán sin alterar la decisión histórica.
+La evidencia quedó satisfecha el 2026-09-15: 165 tests host cubren TRB, cycle,
+ring, correlación, parser y decoder; los parsers USB participan en 25 000 casos
+de mutation-fuzz; y `make usb-hid-test` entrega una tecla QMP a la TTY mediante
+el mismo Event Ring con 1 y 4 vCPU. La ruta Q35 conserva simultáneamente la
+lectura virtio-blk/FAT32. Permanecen los límites explícitos de un dispositivo,
+polling, memoria DMA no reciclada y ausencia de hotplug/MSI.
 
 ## Referencias
 
