@@ -37,6 +37,10 @@ Brane OS utiliza una estrategia de testing multinivel que cubre desde unidades a
   scratchpads, TRB de comando/control/normal, ring/cycle, dispatcher y
   correlación de eventos, parsers defensivos Device/Configuration/HID,
   DCI/interval y decoder boot keyboard.
+- USB Mass Storage: selección estricta `08/06/50`, par Bulk IN/OUT, CBW/CSW,
+  CDB SCSI y endian, inquiry/sense/capacity, rango y fragmentación de lectura.
+  Un transporte BOT simulado verifica phase error, CSW inválido, orden de Reset
+  Recovery y cuarentena tras timeout sin emitir un segundo CBW.
 
 **Herramientas:** `cargo test`, test modules en Rust (`#[cfg(test)]`).
 
@@ -146,8 +150,8 @@ exactamente una lease ligada a la propuesta.
 con cargas grandes y reproducibles.
 
 **Cobertura:**
-- 25 000 entradas binarias mutadas sobre parsers FAT32, BDP, Brane Session y
-  descriptores USB/HID.
+- 25 000 entradas binarias mutadas sobre parsers FAT32, BDP, Brane Session,
+  descriptores USB/HID/Mass Storage y respuestas BOT/SCSI.
 - 10 000 roundtrips de paquetes válidos Brane Session y BDP.
 - 50 000 operaciones del frame allocator contrastadas con un modelo de referencia.
 - 256 ciclos de saturación, backpressure, drenaje FIFO y wraparound de IPC.
@@ -179,12 +183,13 @@ GitHub Actions valida en cada `push` y `pull_request` hacia `main`:
 | Formatting | Activo | `cargo fmt --all -- --check` |
 | Clippy | Activo | Kernel bare-metal + runner host con `-D warnings` |
 | Kernel unit tests | Activo | `cargo test -p brane_os_kernel --lib` |
-| **Storage/USB host** | **Activo** | xHCI USB/HID, MCFG/ECAM, PCI, block, DMA, virtqueue y FAT32 MBR/superfloppy/directorios/cadenas (165 tests totales) |
+| **Storage/USB host** | **Activo** | xHCI USB/HID/Bulk, BOT/SCSI y recovery negativo, MCFG/ECAM, PCI, block, DMA, virtqueue y FAT32 (178 tests totales) |
 | **Stress y mutation-fuzz** | **Activo** | `make stress-test` (parsers, allocator, IPC y dispatcher SMP concurrente) |
 | **Release artifact (ISO UEFI)** | **Activo** | `make iso-test VERSION=ci` (ISO, checksum y boot con OVMF) |
 | **Boot test (QEMU)** | **Activo** | Kernel release + FAT32 virtio legacy read-only; exige LBA0, montaje `/disk` y lectura VFS real |
 | **PCIe ECAM test (Q35)** | **Activo** | `make pcie-test` exige MCFG/ECAM, virtio-blk/FAT32 y enumeración/configuración del `usb-kbd` por xHCI |
 | **USB HID test (Q35/QMP)** | **Activo** | `make usb-hid-test` inyecta `u`, exige Transfer Event propio y entrega TTY con 1 y 4 vCPU |
+| **USB storage test (Q35)** | **Activo** | `make usb-storage-test` descubre BOT/SCSI LUN 0, registra `usb-storage0`, monta FAT32 en `/usb` y conserva `/disk` con 1 y 4 vCPU |
 | **SMP/AP startup test (QEMU)** | **Activo** | `make smp-test` (4 vCPU, INIT/SIPI, estado per-CPU, 8 rondas acotadas y workers reales en CPU1–CPU3) |
 | **SMP run-queue + dispatcher model (host)** | **Activo** | `cargo test -p brane_os_kernel --lib sched::multicore_tests` (balanceo, steal, ownership y retorno al idle entre quanta) |
 | **SMP per-CPU timer state (host)** | **Activo** | `cargo test -p brane_os_kernel --lib cpu_local_scheduler_tracks_timer_without_touching_bsp` (slot, ticks y aislamiento del cursor BSP) |
@@ -232,9 +237,9 @@ La validación local equivalente recomendada está documentada en
 17. ~~Fase 13: transferencias de control, descriptores USB/HID y endpoint
     interrupt IN.~~ ✅ **Completado** (165 tests/fuzz + Device/Configuration/
     HID reales + QMP → Transfer Event → TTY en Q35 con 1/4 vCPU)
-18. Fase 13: USB Mass Storage Bulk-Only, perfil SCSI read-only, registro como
-    `BlockDevice` y montaje FAT32; depende del corte HID y se especifica en
-    [`USB_STORAGE.md`](USB_STORAGE.md).
+18. ~~Fase 13: USB Mass Storage Bulk-Only, perfil SCSI read-only, registro como
+    `BlockDevice` y montaje FAT32.~~ ✅ **Completado** (178 tests/fuzz + recovery
+    negativo + `usb-storage0` → `/usb` en Q35 con 1/4 vCPU, conservando `/disk`)
 19. Fase 13: capability walker PCI, MSI-X con fallback MSI/polling y dispatcher
     xHCI diferido; diseño y criterio de salida en
     [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).

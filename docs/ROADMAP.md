@@ -18,10 +18,10 @@
  ─────────────────────────────────────────────────────┼─────────────────────────────────────────────────▶
 ```
 
-**Foco actual:** Fase 13 — reutilizar el motor de transferencias xHCI para USB
-Mass Storage Bulk-Only, SCSI read-only, registro en la block layer y montaje
-FAT32. La secuencia, invariantes y pruebas están definidas en
-[`USB_STORAGE.md`](USB_STORAGE.md).
+**Foco actual:** Fase 13 — entregar los eventos xHCI mediante MSI-X, con
+fallback MSI y polling, conservando el dispatcher único ya validado por USB HID
+y Mass Storage. La secuencia, rollback y pruebas están definidos en
+[`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
 
 ### Disciplina de cambios por fase
 
@@ -280,9 +280,9 @@ físico se mantiene en la matriz de release de la Fase 11.
 |-----------|--------|-----------|-------------|
 | Enumeración PCI/PCIe robusta | ✅ | ALTA | ECAM/MCFG con fallback CF8/CFC, bridges, multifunction, BAR 32/64 y apertures MMIO medidas/mapeadas |
 | MSI/MSI-X | 🔲 | MEDIA | Diseño, ownership y fallback definidos en `PCI_INTERRUPTS.md` y ADR-007 |
-| Controlador xHCI | 🔄 | ALTA | Transferencias de control/interrupt IN y dispatcher listos; faltan storage, MSI/MSI-X y hotplug |
+| Controlador xHCI | 🔄 | ALTA | Control, interrupt y bulk listos; faltan MSI/MSI-X, múltiples slots y hotplug |
 | USB HID | ✅ | ALTA | Teclado boot protocol → TTY en Q35 con 1/4 vCPU; ratón fuera de la baseline |
-| USB mass storage | 🔲 | MEDIA | xHCI + block layer |
+| USB mass storage | ✅ | MEDIA | BOT/SCSI LUN 0 read-only → `usb-storage0` → FAT32 `/usb`, Q35 1/4 vCPU |
 | Block layer | ✅ | ALTA | Trait, registry, validación I/O y primer backend real |
 | DMA + virtio-blk legacy | ✅ | ALTA | Frames contiguos <4 GiB, virtqueue y lectura sectorial en QEMU |
 | FAT32 de lectura real | ✅ | MEDIA | MBR/superfloppy, cadenas de clusters, directorios 8.3 y montaje VFS read-only |
@@ -362,9 +362,16 @@ en Q35 con 1 y 4 vCPU; 165 tests host cubren TRB, ring, correlación, parsers y
 decoder, incluidos los parsers USB en mutation-fuzz. `make test-all` conserva
 además boot legacy, SMP, ACPI S3, security, integration y E2E.
 
-**Noveno corte planificado:** reutilizar el motor de transferencias para USB
-Mass Storage Bulk-Only, SCSI read-only, registro en la block layer y montaje
-FAT32. El diseño y sus límites están en [`USB_STORAGE.md`](USB_STORAGE.md).
+**Noveno corte completado:** el parser elige estrictamente una interfaz Mass
+Storage `08/06/50` y configura en una sola operación sus endpoints Bulk IN/OUT,
+cada uno con ring, cursor y bounce DMA propios. `usb_storage.rs` serializa CBW y
+CSW sin padding, valida tag/residue/status, ejecuta `INQUIRY`, readiness con
+`REQUEST SENSE`, `READ CAPACITY(10)` y `READ(10)` fragmentado. El backend LUN 0
+se registra read-only como `usb-storage0`; el boot monta una imagen FAT32 con
+firma propia en `/usb` y conserva virtio-blk en `/disk`. Reset Recovery aplica
+Mass Storage Reset, limpia ambos halts y sincroniza los endpoints xHCI; tests
+negativos simulan phase error, CSW inválido y timeout sin reutilización. Los 178
+tests host y `make usb-storage-test` pasan en Q35 con 1 y 4 vCPU.
 
 **Décimo corte planificado:** sustituir el busy-wait continuo por entrega
 MSI-X, con fallback MSI y después polling, sin cambiar el consumidor único del
@@ -425,13 +432,13 @@ generation conforme a [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) y
 
 | Métrica | Valor |
 |---------|-------|
-| **Módulos del kernel** | 39 archivos de módulo (excluye `lib.rs`, `main.rs`, `tests.rs`) |
-| **Líneas de código (Rust)** | ~18,000 |
-| **Unit tests** | 165 (incluye xHCI USB/HID, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
+| **Módulos del kernel** | 40 archivos de módulo (excluye `lib.rs`, `main.rs`, `tests.rs`) |
+| **Líneas de código (Rust)** | ~23,000 |
+| **Unit tests** | 178 (incluye USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
 | **Syscalls definidas** | 28 (incluye Kill, SigAction, SigReturn, SigProcMask) |
 | **Harnesses de test Python** | 8 (boot + ACPI S3 + 2 security + 2 integration + 2 e2e) |
-| **CI checks** | 13 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, USB HID, ACPI S3, security, integration, E2E) |
-| **Make targets de test** | 12 (test, stress-test, iso-test, release-test, boot-test, pcie-test, usb-hid-test, smp-test, acpi-test, security-test, integration-test, e2e-test) |
+| **CI checks** | 14 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, USB HID, USB storage, ACPI S3, security, integration, E2E) |
+| **Make targets de test** | 13 (test, stress-test, iso-test, release-test, boot-test, pcie-test, usb-hid-test, usb-storage-test, smp-test, acpi-test, security-test, integration-test, e2e-test) |
 | **Fases completadas** | 11 fases completadas (1–10 y 12); Fase 11 espera gate físico/release |
 
 ---

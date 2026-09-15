@@ -735,9 +735,9 @@ pub trait Driver: Send + Sync {
 | Keyboard (PS/2) | ✅ Implementado | 1/33 | Entrada TTY básica |
 | Block layer | ✅ Implementado | — | Registry, validación y dispatch sectorial |
 | Disk (virtio-blk) | ✅ Legacy | Polling PCI | Virtqueue por polling y DMA bajo 4 GiB |
-| Disk (USB) | 🔲 Pendiente | Polling | BOT/SCSI read-only diseñado en `USB_STORAGE.md` |
+| Disk (USB) | ✅ BOT/SCSI read-only | Polling | LUN 0, `usb-storage0` y FAT32 en `/usb` |
 | Network (virtio-net) | ✅ Base integrada | PCI | Discovery compartido + transporte legacy I/O |
-| USB/xHCI | ✅ Teclado HID boot | Polling; MSI diseñado | EP0, descriptores, dispatcher único y endpoint interrupt IN → TTY sobre PCIe MMIO |
+| USB/xHCI | ✅ HID + Mass Storage | Polling; MSI diseñado | EP0, interrupt IN y Bulk IN/OUT sobre dispatcher único; un slot activo |
 | Bluetooth | 🔲 Futuro | — | Para mobile companion |
 
 ### 7.3 Inventario PCI
@@ -857,17 +857,29 @@ busy-wait continuo. `make usb-hid-test` demuestra la ruta QMP → `usb-kbd` →
 xHCI → TTY con 1 y 4 vCPU. Hubs, ratón, hotplug y MSI/MSI-X siguen fuera de la
 baseline; la especificación y evidencia están en [`USB_XHCI.md`](USB_XHCI.md).
 
-### 7.7 USB Mass Storage objetivo
+### 7.7 USB Mass Storage
 
-El corte posterior a HID reutilizará control transfers, el despachador común y
-los Transfer Rings para configurar una interface Mass Storage `08h/06h/50h`.
-La baseline elegida es Bulk-Only Transport con un solo comando activo, LUN 0 y
-los comandos SCSI mínimos para descubrir geometría y ejecutar `READ(10)`.
+El mismo walker de Configuration descriptors selecciona estrictamente una
+interface Mass Storage `08/06/50` con un par Bulk IN/OUT del mismo alternate
+setting. `Configure Endpoint` publica ambos contextos en una operación y cada
+DCI conserva un Transfer Ring, producer cycle y bounce DMA independientes. La
+ruta sigue usando polling síncrono acotado y el dispatcher único de ADR-006.
 
-El backend se registrará como `usb-storage0` read-only en `BlockRegistry`; FAT32
-lo consumirá sin conocer CBW, CSW, endpoints o DMA. UAS, escritura, múltiples
-LUN y hotplug quedan fuera del primer incremento. La secuencia, recovery,
-ownership y pruebas están definidos en [`USB_STORAGE.md`](USB_STORAGE.md).
+`usb_storage.rs` implementa Bulk-Only Transport con un comando activo: serializa
+CBW/CSW campo por campo, valida signature, tag, residue y status, y ejecuta el
+perfil SCSI `INQUIRY`, `TEST UNIT READY`, `REQUEST SENSE`,
+`READ CAPACITY(10)` y `READ(10)`. Un mutex protege tags, disponibilidad y el
+bounce buffer de una página; las lecturas mayores se fragmentan antes de
+exponer datos al caller. Phase errors, CSW incoherentes y fallos de transporte
+activan una sola secuencia Reset Recovery; si un timeout impide recuperar el
+ownership DMA, el backend queda en cuarentena y no publica otro CBW.
+
+LUN 0 se registra como `usb-storage0` read-only en `BlockRegistry`; FAT32 lo
+consume mediante `BlockDeviceHandle` y se monta en `/usb`, mientras virtio-blk
+permanece en `/disk`. `make usb-storage-test` demuestra ambas rutas en Q35 con
+1 y 4 vCPU. UAS, escritura, múltiples LUN, hubs, hotplug y teclado+disco USB
+simultáneos quedan fuera de esta baseline porque xHCI conserva un único slot.
+La implementación y evidencia están en [`USB_STORAGE.md`](USB_STORAGE.md).
 
 ### 7.8 FAT32 read-only
 
@@ -1075,19 +1087,17 @@ Ver carpeta [`docs/ADR/`](ADR/) para decisiones formales.
 
 ## 13. Próximos pasos de implementación
 
-1. Integrar USB mass storage con la block layer y mantener FAT32 read-only como
-   primer consumidor.
-2. Activar MSI-X/MSI para xHCI conservando el dispatcher y fallback polling.
-3. Implementar la matriz syscall → capability → audit event y la copia segura
+1. Activar MSI-X/MSI para xHCI conservando el dispatcher y fallback polling.
+2. Implementar la matriz syscall → capability → audit event y la copia segura
    de buffers ring 3 definida en `SYSCALL_SECURITY.md`.
-4. Conectar las syscalls IPC al core con endpoints, sender y wait queues de
+3. Conectar las syscalls IPC al core con endpoints, sender y wait queues de
    `IPC_RUNTIME.md`.
-5. Arrancar audit, identity, policy y capability broker como procesos ring 3,
+4. Arrancar audit, identity, policy y capability broker como procesos ring 3,
    con roles bootstrap y fallo cerrado conforme a `SECURITY_SERVICES.md`.
-6. Extraer orchestrator/model de IA a ring 3, primero en `ObserveOnly`, según
+5. Extraer orchestrator/model de IA a ring 3, primero en `ObserveOnly`, según
    `AI_RUNTIME.md`.
-7. Añadir storage durable/trusted time e implementar `.bpkg`, metadata y
+6. Añadir storage durable/trusted time e implementar `.bpkg`, metadata y
    activation transaccional según `PACKAGE_MANAGER.md`.
-8. Completar la matriz de hardware físico y el gate de release v1.0.
+7. Completar la matriz de hardware físico y el gate de release v1.0.
 
 El orden ejecutivo y los criterios de salida se mantienen en `ROADMAP.md`.

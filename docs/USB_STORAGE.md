@@ -1,8 +1,8 @@
-# USB Mass Storage sobre xHCI — especificación de implementación
+# USB Mass Storage sobre xHCI — implementación y evidencia
 
 > Fase: **13 — Hardware I/O y almacenamiento**.
-> Estado: **diseño del corte posterior a USB HID; implementación pendiente**.
-> Última actualización: **2026-09-12**.
+> Estado: **noveno corte implementado y validado en QEMU/Q35**.
+> Última actualización: **2026-09-15**.
 
 ## 1. Objetivo
 
@@ -262,15 +262,17 @@ y rango antes de invocar el driver.
 
 ## 8. Incrementos de implementación
 
-1. Extraer tipos USB descriptor/endpoint reutilizables del camino HID.
-2. Añadir constructores y parsers puros para CBW, CSW y los cinco CDB mínimos.
-3. Implementar Transfer Rings Bulk IN/OUT y pruebas de DCI/contextos.
-4. Enumerar la interface `08h/06h/50h` y configurar ambos endpoints.
-5. Implementar la máquina BOT, validación de CSW y Reset Recovery.
-6. Ejecutar `INQUIRY`/ready/sense/capacity y registrar `usb-storage0`.
-7. Implementar lectura fragmentada y sonda LBA0.
-8. Montar FAT32 USB en `/usb` sin cambiar `/disk` durante la regresión conjunta.
-9. Añadir QEMU 1/4 vCPU y, después, una prueba física read-only.
+1. ✅ Tipos USB descriptor/endpoint reutilizables y parser Mass Storage.
+2. ✅ Constructores y parsers puros para CBW, CSW y los cinco CDB mínimos.
+3. ✅ Transfer Rings Bulk IN/OUT, DCI/contextos y buffers DMA separados para
+   CBW, Data IN y CSW.
+4. ✅ Enumeración estricta `08h/06h/50h` y configuración de ambos endpoints.
+5. ✅ Máquina BOT, validación de CSW y Reset Recovery.
+6. ✅ `INQUIRY`/ready/sense/capacity y registro de `usb-storage0`.
+7. ✅ Lectura fragmentada y sonda LBA0.
+8. ✅ FAT32 USB en `/usb` sin cambiar `/disk` durante la regresión conjunta.
+9. ✅ QEMU 1/4 vCPU; la prueba física read-only permanece en el gate general
+   de hardware de las fases 11/13.
 
 El montaje separado evita que el orden de registro de dispositivos cambie el
 boot volume seleccionado. La elección de disco raíz por UUID/label queda para
@@ -296,7 +298,7 @@ CBW/CSW, CDB y parsers de respuesta entran en mutation-fuzz con semilla fija.
 
 ### 9.2 QEMU/Q35
 
-Crear `make usb-storage-test` con una imagen FAT32 separada:
+`make usb-storage-test` crea una imagen FAT32 separada y arranca:
 
 ```text
 -machine q35
@@ -332,7 +334,7 @@ Un backend BOT simulado o fault injection debe cubrir:
 - desconexión antes de Data o CSW;
 - timeout sin segundo CBW ni reutilización prematura de DMA.
 
-## 10. Criterio de salida
+## 10. Criterio de salida y evidencia
 
 El corte se considera terminado cuando:
 
@@ -346,6 +348,25 @@ El corte se considera terminado cuando:
 - virtio-blk/FAT32, USB HID y boot sin USB mantienen sus regresiones;
 - roadmap, arquitectura, runbook, plan de pruebas y changelog registran la
   evidencia observada, no sólo el diseño.
+
+La baseline de software satisface este criterio el 2026-09-15:
+
+- `cargo test -p brane_os_kernel --lib`: **178 tests**; incluye parsers,
+  framing/endian, CDB, geometría, read-only y un transporte BOT simulado.
+- Las pruebas negativas verifican phase error e identidad CSW inválida seguidos
+  por Reset Recovery en orden, y timeout con recuperación fallida seguido por
+  cuarentena sin un segundo CBW.
+- `make build`, `make clippy`, mutation-fuzz y stress pasan para host y target
+  `x86_64-unknown-none`.
+- `make usb-storage-test` pasa en Q35 con **1 y 4 vCPU**. QEMU anuncia
+  `VID 46F4/PID 0001`, Bulk IN `0x81`, Bulk OUT `0x02`, paquetes de 1024 bytes
+  y 131072 bloques de 512 bytes.
+- En la misma ejecución aparecen `usb-storage0` read-only y `virtio-blk0`; FAT32
+  monta las firmas distintas `BRANEUSB` en `/usb` y `BRANEOS` en `/disk`, y lee
+  ambos `README.TXT` antes de llegar a `brane>`.
+
+No se infiere validación física de esta evidencia QEMU. La fila real de USB
+Mass Storage continúa pendiente en [`HARDWARE_MATRIX.md`](HARDWARE_MATRIX.md).
 
 ## 11. Referencias normativas
 

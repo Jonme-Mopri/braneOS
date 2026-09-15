@@ -1160,6 +1160,7 @@ mod fuzz_tests {
     use crate::fat32::{Fat32BootSector, PartitionEntry, SECTOR_SIZE};
     use crate::xhci::{
         configuration_total_length, parse_device_descriptor, parse_hid_keyboard_configuration,
+        parse_mass_storage_configuration,
     };
     use std::string::String;
 
@@ -1190,6 +1191,8 @@ mod fuzz_tests {
             let _ = parse_device_descriptor(input, (case % 5 + 1) as u8);
             let _ = configuration_total_length(input);
             let _ = parse_hid_keyboard_configuration(input);
+            let _ = parse_mass_storage_configuration(input);
+            crate::usb_storage::fuzz_untrusted_storage_bytes(input);
 
             if let Some((packet, consumed)) = parsed {
                 assert!((4..=input.len()).contains(&consumed));

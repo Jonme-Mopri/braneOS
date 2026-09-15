@@ -47,6 +47,7 @@ pub mod smp;
 pub mod socket;
 pub mod syscall;
 pub mod tty;
+pub mod usb_storage;
 pub mod usermode;
 pub mod vfs;
 pub mod virtio;

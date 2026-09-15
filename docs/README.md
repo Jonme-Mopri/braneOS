@@ -17,14 +17,14 @@ una descripción de diseño no implica por sí sola que exista código ejecutabl
 | IA | 🟡 ObserveOnly sintético en kernel | Runtime/modelo aislados y telemetría real |
 | Paquetes | 🔲 Diseño `bpkg` | Storage durable, trust root y trusted time |
 | SMP/APIC | ✅ 4 vCPU en QEMU/TCG | Validación física |
-| Almacenamiento | ✅ virtio-blk + FAT32 read-only | USB mass storage y escritura persistente |
-| USB/xHCI | ✅ Teclado HID operativo en Q35 | USB mass storage y MSI/MSI-X |
+| Almacenamiento | ✅ virtio-blk y USB BOT/SCSI + FAT32 read-only | Escritura persistente |
+| USB/xHCI | ✅ HID y Mass Storage operativos en Q35 | MSI/MSI-X, múltiples slots y hotplug |
 | Interrupciones PCI | 🔲 Diseño MSI/MSI-X | Implementar primero sobre xHCI |
 | Release | 🟡 Artefactos y automatización listos | Matriz física y tag v1.0 |
 
-El foco de implementación vigente es la **Fase 13**: reutilizar el motor de
-transferencias xHCI ya validado con el teclado HID para USB Mass Storage
-read-only. El estado detallado y los criterios de salida se mantienen en
+El foco de implementación vigente es la **Fase 13**: migrar el dispatcher xHCI
+ya validado con HID y Mass Storage desde polling a MSI-X, con fallback MSI y
+polling. El estado detallado y los criterios de salida se mantienen en
 [`ROADMAP.md`](ROADMAP.md).
 
 ## Ruta de lectura
@@ -47,7 +47,7 @@ read-only. El estado detallado y los criterios de salida se mantienen en
 | Extraer y aislar el runtime IA | [`AI_RUNTIME.md`](AI_RUNTIME.md) |
 | Diseñar paquetes, repositorio e instalación | [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) |
 | Revisar la implementación USB HID | [`USB_XHCI.md`](USB_XHCI.md) |
-| Preparar USB Mass Storage sobre xHCI | [`USB_STORAGE.md`](USB_STORAGE.md) |
+| Revisar USB Mass Storage sobre xHCI | [`USB_STORAGE.md`](USB_STORAGE.md) |
 | Migrar drivers PCI de polling a MSI/MSI-X | [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md) |
 | Entender decisiones arquitectónicas | [`ADR/README.md`](ADR/README.md) |
 | Consultar cambios por versión | [`../CHANGELOG.md`](../CHANGELOG.md) |

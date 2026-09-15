@@ -288,6 +288,10 @@ jobs:
             suite: usb-hid
             target: usb-hid-test
             boot_timeout: "60"
+          - name: USB Storage Test (Q35/BOT/SCSI)
+            suite: usb-storage
+            target: usb-storage-test
+            boot_timeout: "60"
           - name: ACPI S3 Test (QEMU)
             suite: acpi
             target: acpi-test

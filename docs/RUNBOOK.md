@@ -20,7 +20,8 @@ El arranque actual inicializa:
 - syscalls e IPC,
 - capacidades, auditoria y loader de modulos,
 - inventario PCI, block layer, virtio-blk legacy y FAT32 read-only en `/disk`,
-- xHCI con transferencias EP0 y teclado HID boot conectado a la TTY,
+- xHCI con EP0, teclado HID boot conectado a la TTY y Mass Storage BOT/SCSI
+  read-only montable en `/usb`,
 - Brane Protocol, IA observadora, VFS, RamFS, TTY, shell, red, sockets y DNS.
 
 El sistema entra en `brsh` y queda esperando entrada por TTY.
@@ -58,6 +59,11 @@ conecta `usb-kbd`, resetea su root port, reserva slot/contextos, lee sus
 descriptores, completa `SET_CONFIGURATION`/`SET_PROTOCOL` y configura el
 endpoint interrupt IN. `make usb-hid-test` añade QMP, inyecta `u` después del
 prompt y exige el marcador propio del Transfer Event con 1 y 4 vCPU.
+`make usb-storage-test` sustituye el teclado por un disco USB `08/06/50`,
+valida sus endpoints Bulk IN/OUT, descubre LUN 0 con SCSI y monta una segunda
+imagen FAT32 de firma `BRANEUSB` en `/usb`; virtio-blk y `/disk` permanecen
+activos en la misma ejecución. La limitación a un dispositivo USB por test se
+debe al único slot que conserva todavía el controlador.
 
 ---
 
@@ -193,20 +199,22 @@ make release-test VERSION=dev
 - runner host con `-D warnings`.
 
 `make test-all` ejecuta unit, stress/mutation-fuzz, boot legacy, PCIe ECAM, SMP,
-USB HID con 1/4 vCPU, ACPI S3, security, integration y E2E. Los targets QEMU comparten una imagen del kernel release —el
+USB HID y USB storage con 1/4 vCPU, ACPI S3, security, integration y E2E. Los targets QEMU comparten una imagen del kernel release —el
 ELF debug excede el timeout de carga del bootloader BIOS bajo TCG— y detectan el
 prompt `brane>` aunque no termine con salto de línea.
 
 `make release-test` valida además los artefactos versionados y arranca la ISO
 UEFI con OVMF.
 
-Los targets `boot-test`, `pcie-test`, `usb-hid-test`, `smp-test` e `iso-test` crean un disco FAT32 temporal
+Los targets `boot-test`, `pcie-test`, `usb-hid-test`, `usb-storage-test`,
+`smp-test` e `iso-test` crean un disco FAT32 temporal
 independiente del medio de arranque y fuerzan `disable-modern=on`. Además del
 prompt, exigen el registro de `virtio-blk0`, una transferencia DMA, el montaje
 en `/disk` y la lectura del archivo de prueba mediante el VFS.
 
 `make stress-test` usa semillas fijas para mutar los parsers FAT32, BDP y Brane
-Session, además de los descriptores USB/HID; también compara el frame allocator
+Session, además de los descriptores USB/HID/Mass Storage y wrappers BOT/SCSI;
+también compara el frame allocator
 con un modelo de referencia y satura las colas IPC. No requiere QEMU y sus
 fallos son reproducibles.
 
@@ -214,6 +222,11 @@ fallos son reproducibles.
 espera `brane>`, inyecta `sendkey u` y sólo acepta el test si aparece
 `[xhci] HID report received: ... key=u`; una entrada PS/2 no puede producir ese
 marcador y, por tanto, no causa un falso positivo.
+
+`make usb-storage-test` no necesita QMP. El harness conecta `qemu-xhci`, crea
+una imagen FAT32 USB independiente y exige `Mass storage ready`, geometría de
+131072 bloques, registro read-only de `usb-storage0`, LBA0 y lectura de
+`/usb/README.TXT`. Se ejecuta con 1 y 4 vCPU.
 
 El test ACPI controla QEMU mediante QMP: ordena `suspend` desde `brsh`, espera
 los eventos `SUSPEND` y `WAKEUP`, envía `system_wakeup` y confirma que el shell
@@ -241,6 +254,7 @@ Jobs actuales:
 | Boot Test (QEMU) | `python3 tests/boot/test_boot.py` |
 | PCIe ECAM Test (Q35) | `make pcie-test` |
 | USB HID Test (Q35/QMP) | `make usb-hid-test` |
+| USB Storage Test (Q35/BOT/SCSI) | `make usb-storage-test` |
 | ACPI S3 Test (QEMU/QMP) | `make acpi-test` |
 | Security Tests (QEMU) | `make security-test` |
 | Integration Tests (QEMU) | `make integration-test` |
@@ -264,13 +278,13 @@ Antes de publicar v1.0 quedan dos gates deliberadamente manuales:
    crear el tag versionado.
 
 QEMU cubre BIOS/UEFI de forma automatizada, pero no sustituye la validación
-física. USB HID está completo para la baseline de un teclado boot sin hubs:
-Q35 valida control transfers, descriptores, Configure Endpoint y reportes
-interrupt IN con 1/4 vCPU. USB Mass Storage continúa como diseño posterior, documentado en
-[`USB_STORAGE.md`](USB_STORAGE.md); todavía no existe un target ejecutable para
-esa ruta.
+física. USB HID está completo para un teclado boot sin hubs y USB Mass Storage
+para un disco BOT/SCSI LUN 0 read-only: Q35 valida ambos caminos por separado
+con 1/4 vCPU y mantiene virtio-blk/FAT32. El controlador conserva un solo slot,
+por lo que teclado y disco USB simultáneos, hubs y hotplug permanecen fuera de
+la baseline; la evidencia de storage está en [`USB_STORAGE.md`](USB_STORAGE.md).
 MSI/MSI-X también permanece sin implementar: xHCI y virtio-blk progresan por
-polling. La transición posterior a USB storage, sus fallbacks y el futuro target
+polling. La transición, sus fallbacks y el futuro target
 `make pci-interrupt-test` están especificados en
 [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
 

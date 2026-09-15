@@ -1,4 +1,4 @@
-//! xHCI discovery, polling transfers and USB HID boot-keyboard support.
+//! xHCI discovery, polling transfers, USB HID and Mass Storage support.
 //!
 //! The controller is brought to the Running state with a Device Context Base
 //! Address Array, Command Ring and one polling Event Ring. Supported Protocol
@@ -72,6 +72,8 @@ const TRB_TYPE_STATUS_STAGE: u32 = 4;
 const TRB_TYPE_ENABLE_SLOT_COMMAND: u32 = 9;
 const TRB_TYPE_ADDRESS_DEVICE_COMMAND: u32 = 11;
 const TRB_TYPE_CONFIGURE_ENDPOINT_COMMAND: u32 = 12;
+const TRB_TYPE_RESET_ENDPOINT_COMMAND: u32 = 14;
+const TRB_TYPE_SET_TR_DEQUEUE_POINTER_COMMAND: u32 = 16;
 const TRB_TYPE_NO_OP_COMMAND: u32 = 23;
 const TRB_TYPE_TRANSFER_EVENT: u32 = 32;
 const TRB_TYPE_COMMAND_COMPLETION_EVENT: u32 = 33;
@@ -108,16 +110,25 @@ const USB_DESCRIPTOR_INTERFACE: u8 = 4;
 const USB_DESCRIPTOR_ENDPOINT: u8 = 5;
 const USB_REQUEST_GET_DESCRIPTOR: u8 = 6;
 const USB_REQUEST_SET_CONFIGURATION: u8 = 9;
+const USB_REQUEST_CLEAR_FEATURE: u8 = 1;
+const USB_FEATURE_ENDPOINT_HALT: u16 = 0;
 const HID_REQUEST_SET_PROTOCOL: u8 = 0x0B;
+const MASS_STORAGE_REQUEST_RESET: u8 = 0xFF;
 const USB_REQUEST_TYPE_DEVICE_IN: u8 = 0x80;
 const USB_REQUEST_TYPE_DEVICE_OUT: u8 = 0x00;
 const USB_REQUEST_TYPE_HID_INTERFACE_OUT: u8 = 0x21;
+const USB_REQUEST_TYPE_CLASS_INTERFACE_OUT: u8 = 0x21;
+const USB_REQUEST_TYPE_ENDPOINT_OUT: u8 = 0x02;
 const USB_CLASS_HID: u8 = 0x03;
 const HID_SUBCLASS_BOOT: u8 = 0x01;
 const HID_PROTOCOL_KEYBOARD: u8 = 0x01;
 const USB_ENDPOINT_DIRECTION_IN: u8 = 0x80;
 const USB_ENDPOINT_TRANSFER_TYPE_MASK: u8 = 0x03;
 const USB_ENDPOINT_TRANSFER_INTERRUPT: u8 = 0x03;
+const USB_ENDPOINT_TRANSFER_BULK: u8 = 0x02;
+const USB_CLASS_MASS_STORAGE: u8 = 0x08;
+const MASS_STORAGE_SUBCLASS_SCSI: u8 = 0x06;
+const MASS_STORAGE_PROTOCOL_BULK_ONLY: u8 = 0x50;
 const HID_BOOT_REPORT_BYTES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +159,14 @@ pub struct XhciControllerInfo {
     pub hid_endpoint_dci: u8,
     pub hid_max_packet_size: u16,
     pub hid_interval: u8,
+    pub mass_storage_ready: bool,
+    pub mass_storage_interface: u8,
+    pub mass_storage_bulk_in: u8,
+    pub mass_storage_bulk_out: u8,
+    pub mass_storage_bulk_in_dci: u8,
+    pub mass_storage_bulk_out_dci: u8,
+    pub mass_storage_bulk_in_packet: u16,
+    pub mass_storage_bulk_out_packet: u16,
     pub command_probe_completed: bool,
     pub running: bool,
 }
@@ -179,6 +198,7 @@ pub enum XhciInitError {
     InvalidDescriptor,
     DescriptorTooLarge,
     HidKeyboardNotFound,
+    MassStorageNotFound,
     InvalidHidReport,
     InvalidExtendedCapability,
     PortResetTimeout,
@@ -296,6 +316,30 @@ impl Trb {
             parameter: input_context,
             status: 0,
             control: (TRB_TYPE_CONFIGURE_ENDPOINT_COMMAND << TRB_TYPE_SHIFT)
+                | ((slot_id as u32) << 24),
+        }
+    }
+
+    const fn reset_endpoint_command(slot_id: u8, endpoint_id: u8) -> Self {
+        Self {
+            parameter: 0,
+            status: 0,
+            control: (TRB_TYPE_RESET_ENDPOINT_COMMAND << TRB_TYPE_SHIFT)
+                | ((endpoint_id as u32 & 0x1F) << 16)
+                | ((slot_id as u32) << 24),
+        }
+    }
+
+    const fn set_tr_dequeue_pointer_command(
+        dequeue_pointer: u64,
+        slot_id: u8,
+        endpoint_id: u8,
+    ) -> Self {
+        Self {
+            parameter: dequeue_pointer,
+            status: 0,
+            control: (TRB_TYPE_SET_TR_DEQUEUE_POINTER_COMMAND << TRB_TYPE_SHIFT)
+                | ((endpoint_id as u32 & 0x1F) << 16)
                 | ((slot_id as u32) << 24),
         }
     }
@@ -447,6 +491,26 @@ pub(crate) struct HidKeyboardDescriptor {
     pub interval: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MassStorageDescriptor {
+    pub configuration_value: u8,
+    pub interface_number: u8,
+    pub bulk_in_address: u8,
+    pub bulk_in_max_packet_size: u16,
+    pub bulk_out_address: u8,
+    pub bulk_out_max_packet_size: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MassStorageTransportInfo {
+    pub slot_id: u8,
+    pub interface_number: u8,
+    pub bulk_in_address: u8,
+    pub bulk_out_address: u8,
+    pub bulk_in_max_packet_size: u16,
+    pub bulk_out_max_packet_size: u16,
+}
+
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
     let value = bytes.get(offset..offset.checked_add(2)?)?;
     Some(u16::from_le_bytes([value[0], value[1]]))
@@ -576,6 +640,111 @@ pub(crate) fn parse_hid_keyboard_configuration(
     Err(XhciInitError::HidKeyboardNotFound)
 }
 
+pub(crate) fn parse_mass_storage_configuration(
+    bytes: &[u8],
+) -> Result<MassStorageDescriptor, XhciInitError> {
+    let total = usize::from(configuration_total_length(bytes)?);
+    if bytes.len() < total || bytes[0] < 9 || bytes[0] as usize > total {
+        return Err(XhciInitError::InvalidDescriptor);
+    }
+    let configuration_value = bytes[5];
+    if configuration_value == 0 {
+        return Err(XhciInitError::InvalidDescriptor);
+    }
+
+    let mut offset = 0usize;
+    let mut selected_interface = None;
+    let mut bulk_in = None;
+    let mut bulk_out = None;
+    while offset < total {
+        let header = bytes
+            .get(
+                offset
+                    ..offset
+                        .checked_add(2)
+                        .ok_or(XhciInitError::InvalidDescriptor)?,
+            )
+            .ok_or(XhciInitError::InvalidDescriptor)?;
+        let length = usize::from(header[0]);
+        if length < 2 {
+            return Err(XhciInitError::InvalidDescriptor);
+        }
+        let end = offset
+            .checked_add(length)
+            .ok_or(XhciInitError::InvalidDescriptor)?;
+        if end > total {
+            return Err(XhciInitError::InvalidDescriptor);
+        }
+
+        match header[1] {
+            USB_DESCRIPTOR_INTERFACE => {
+                if length < 9 {
+                    return Err(XhciInitError::InvalidDescriptor);
+                }
+                let descriptor = &bytes[offset..end];
+                let matches = descriptor[3] == 0
+                    && descriptor[5] == USB_CLASS_MASS_STORAGE
+                    && descriptor[6] == MASS_STORAGE_SUBCLASS_SCSI
+                    && descriptor[7] == MASS_STORAGE_PROTOCOL_BULK_ONLY;
+                if matches {
+                    if selected_interface.is_some() || descriptor[4] != 2 {
+                        return Err(XhciInitError::InvalidDescriptor);
+                    }
+                    selected_interface = Some(descriptor[2]);
+                    bulk_in = None;
+                    bulk_out = None;
+                } else if selected_interface.is_some() {
+                    break;
+                }
+            }
+            USB_DESCRIPTOR_ENDPOINT if selected_interface.is_some() => {
+                if length < 7 {
+                    return Err(XhciInitError::InvalidDescriptor);
+                }
+                let descriptor = &bytes[offset..end];
+                let address = descriptor[2];
+                let number = address & 0x0F;
+                let attributes = descriptor[3];
+                let max_packet_size =
+                    read_u16(descriptor, 4).ok_or(XhciInitError::InvalidDescriptor)? & 0x07FF;
+                if number == 0
+                    || address & 0x70 != 0
+                    || attributes & USB_ENDPOINT_TRANSFER_TYPE_MASK != USB_ENDPOINT_TRANSFER_BULK
+                    || max_packet_size == 0
+                    || max_packet_size > 1024
+                {
+                    return Err(XhciInitError::InvalidDescriptor);
+                }
+                let candidate = (address, max_packet_size);
+                let endpoint = if address & USB_ENDPOINT_DIRECTION_IN != 0 {
+                    &mut bulk_in
+                } else {
+                    &mut bulk_out
+                };
+                if endpoint.replace(candidate).is_some() {
+                    return Err(XhciInitError::InvalidDescriptor);
+                }
+            }
+            _ => {}
+        }
+        offset = end;
+    }
+
+    let interface_number = selected_interface.ok_or(XhciInitError::MassStorageNotFound)?;
+    let (bulk_in_address, bulk_in_max_packet_size) =
+        bulk_in.ok_or(XhciInitError::MassStorageNotFound)?;
+    let (bulk_out_address, bulk_out_max_packet_size) =
+        bulk_out.ok_or(XhciInitError::MassStorageNotFound)?;
+    Ok(MassStorageDescriptor {
+        configuration_value,
+        interface_number,
+        bulk_in_address,
+        bulk_in_max_packet_size,
+        bulk_out_address,
+        bulk_out_max_packet_size,
+    })
+}
+
 const fn endpoint_id(endpoint_address: u8) -> Option<u8> {
     let number = endpoint_address & 0x0F;
     if number == 0 {
@@ -652,6 +821,8 @@ impl RingCursor {
 enum TransferOwner {
     Control,
     Hid,
+    BulkIn,
+    BulkOut,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -912,6 +1083,20 @@ struct XhciDevice {
     hid_transfer_cursor: RingCursor,
     hid_report_buffer: Option<DmaRegion>,
     hid_transfer_pending: bool,
+    mass_storage_interface: u8,
+    mass_storage_bulk_in_address: u8,
+    mass_storage_bulk_out_address: u8,
+    mass_storage_bulk_in_id: u8,
+    mass_storage_bulk_out_id: u8,
+    mass_storage_bulk_in_max_packet_size: u16,
+    mass_storage_bulk_out_max_packet_size: u16,
+    mass_storage_bulk_in_ring: Option<DmaRegion>,
+    mass_storage_bulk_out_ring: Option<DmaRegion>,
+    mass_storage_bulk_in_cursor: RingCursor,
+    mass_storage_bulk_out_cursor: RingCursor,
+    mass_storage_bulk_in_buffer: Option<DmaRegion>,
+    mass_storage_csw_buffer: Option<DmaRegion>,
+    mass_storage_bulk_out_buffer: Option<DmaRegion>,
 }
 
 #[repr(C)]
@@ -1004,6 +1189,14 @@ fn parse_capabilities(
         hid_endpoint_dci: 0,
         hid_max_packet_size: 0,
         hid_interval: 0,
+        mass_storage_ready: false,
+        mass_storage_interface: 0,
+        mass_storage_bulk_in: 0,
+        mass_storage_bulk_out: 0,
+        mass_storage_bulk_in_dci: 0,
+        mass_storage_bulk_out_dci: 0,
+        mass_storage_bulk_in_packet: 0,
+        mass_storage_bulk_out_packet: 0,
         command_probe_completed: false,
         running: false,
     })
@@ -1410,6 +1603,20 @@ fn copy_from_dma(region: DmaRegion, output: &mut [u8]) -> Result<(), XhciInitErr
 }
 
 #[cfg(target_os = "none")]
+fn copy_to_dma(region: DmaRegion, input: &[u8]) -> Result<(), XhciInitError> {
+    if input.len() > region.len() {
+        return Err(XhciInitError::InvalidCapabilities);
+    }
+    for (offset, byte) in input.iter().copied().enumerate() {
+        let pointer = region
+            .pointer_at::<u8>(offset)
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        unsafe { core::ptr::write_volatile(pointer, byte) };
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "none")]
 fn copy_context(
     source: DmaRegion,
     source_offset: usize,
@@ -1556,6 +1763,20 @@ fn allocate_device(
         hid_transfer_cursor: RingCursor::new(),
         hid_report_buffer: None,
         hid_transfer_pending: false,
+        mass_storage_interface: 0,
+        mass_storage_bulk_in_address: 0,
+        mass_storage_bulk_out_address: 0,
+        mass_storage_bulk_in_id: 0,
+        mass_storage_bulk_out_id: 0,
+        mass_storage_bulk_in_max_packet_size: 0,
+        mass_storage_bulk_out_max_packet_size: 0,
+        mass_storage_bulk_in_ring: None,
+        mass_storage_bulk_out_ring: None,
+        mass_storage_bulk_in_cursor: RingCursor::new(),
+        mass_storage_bulk_out_cursor: RingCursor::new(),
+        mass_storage_bulk_in_buffer: None,
+        mass_storage_csw_buffer: None,
+        mass_storage_bulk_out_buffer: None,
     })
 }
 
@@ -1629,9 +1850,10 @@ impl XhciController {
             core::ptr::write_volatile(command_pointer, command.with_cycle(self.command_cycle))
         };
         let expected_slot = match command.trb_type() {
-            TRB_TYPE_ADDRESS_DEVICE_COMMAND | TRB_TYPE_CONFIGURE_ENDPOINT_COMMAND => {
-                Some(command.slot_id())
-            }
+            TRB_TYPE_ADDRESS_DEVICE_COMMAND
+            | TRB_TYPE_CONFIGURE_ENDPOINT_COMMAND
+            | TRB_TYPE_RESET_ENDPOINT_COMMAND
+            | TRB_TYPE_SET_TR_DEQUEUE_POINTER_COMMAND => Some(command.slot_id()),
             _ => None,
         };
         self.events.command = Some(PendingCommand {
@@ -1888,7 +2110,149 @@ impl XhciController {
         self.arm_hid_transfer()
     }
 
-    fn enumerate_hid_keyboard(
+    fn configure_mass_storage_endpoints(
+        &mut self,
+        frame_allocator: &mut BitmapFrameAllocator,
+        physical_memory_offset: u64,
+        descriptor: MassStorageDescriptor,
+    ) -> Result<(), XhciInitError> {
+        let bulk_in_id = endpoint_id(descriptor.bulk_in_address)
+            .filter(|endpoint| *endpoint > 1 && *endpoint < CONTEXTS_PER_DEVICE as u8)
+            .ok_or(XhciInitError::InvalidDescriptor)?;
+        let bulk_out_id = endpoint_id(descriptor.bulk_out_address)
+            .filter(|endpoint| *endpoint > 1 && *endpoint < CONTEXTS_PER_DEVICE as u8)
+            .ok_or(XhciInitError::InvalidDescriptor)?;
+        if bulk_in_id == bulk_out_id {
+            return Err(XhciInitError::InvalidDescriptor);
+        }
+
+        let bulk_in_ring = DmaRegion::allocate(
+            frame_allocator,
+            physical_memory_offset,
+            FRAME_SIZE,
+            FRAME_SIZE,
+        )?;
+        let bulk_out_ring = DmaRegion::allocate(
+            frame_allocator,
+            physical_memory_offset,
+            FRAME_SIZE,
+            FRAME_SIZE,
+        )?;
+        let bulk_in_buffer = DmaRegion::allocate(
+            frame_allocator,
+            physical_memory_offset,
+            FRAME_SIZE,
+            FRAME_SIZE,
+        )?;
+        let bulk_out_buffer = DmaRegion::allocate(
+            frame_allocator,
+            physical_memory_offset,
+            FRAME_SIZE,
+            FRAME_SIZE,
+        )?;
+        let csw_buffer = DmaRegion::allocate(
+            frame_allocator,
+            physical_memory_offset,
+            FRAME_SIZE,
+            FRAME_SIZE,
+        )?;
+        for ring in [bulk_in_ring, bulk_out_ring] {
+            let link_pointer = ring
+                .pointer_at::<Trb>(COMMAND_RING_USABLE_TRBS * core::mem::size_of::<Trb>())
+                .ok_or(XhciInitError::InvalidCapabilities)?;
+            unsafe { core::ptr::write_volatile(link_pointer, Trb::link(ring.physical_start())) };
+        }
+
+        let device = self
+            .first_device
+            .as_ref()
+            .copied()
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        copy_context(
+            device.device_context,
+            0,
+            device.input_context,
+            self.context_size,
+            self.context_size,
+        )?;
+        write_dma_u32(device.input_context, 0, 0)?;
+        write_dma_u32(
+            device.input_context,
+            4,
+            1 | (1u32 << u32::from(bulk_in_id)) | (1u32 << u32::from(bulk_out_id)),
+        )?;
+        let highest_dci = bulk_in_id.max(bulk_out_id);
+        let slot_context = self.context_size;
+        let mut slot_dword_zero = read_dma_u32(device.input_context, slot_context)?;
+        slot_dword_zero &= !(0x1F << 27);
+        slot_dword_zero |= u32::from(highest_dci) << 27;
+        write_dma_u32(device.input_context, slot_context, slot_dword_zero)?;
+
+        let endpoints = [
+            (
+                bulk_out_id,
+                descriptor.bulk_out_max_packet_size,
+                2u32,
+                bulk_out_ring,
+            ),
+            (
+                bulk_in_id,
+                descriptor.bulk_in_max_packet_size,
+                6u32,
+                bulk_in_ring,
+            ),
+        ];
+        for (dci, max_packet_size, endpoint_type, ring) in endpoints {
+            let endpoint_context = self.context_size * (usize::from(dci) + 1);
+            write_dma_u32(device.input_context, endpoint_context, 0)?;
+            write_dma_u32(
+                device.input_context,
+                endpoint_context + 4,
+                (u32::from(max_packet_size) << 16) | (3 << 1) | (endpoint_type << 3),
+            )?;
+            write_dma_u64(
+                device.input_context,
+                endpoint_context + 8,
+                ring.physical_start() | 1,
+            )?;
+            write_dma_u32(device.input_context, endpoint_context + 16, 512)?;
+        }
+        fence(Ordering::Release);
+        self.submit_command(Trb::configure_endpoint_command(
+            device.input_context.physical_start(),
+            device.slot_id,
+        ))?;
+
+        let device = self
+            .first_device
+            .as_mut()
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        device.configuration_value = descriptor.configuration_value;
+        device.mass_storage_interface = descriptor.interface_number;
+        device.mass_storage_bulk_in_address = descriptor.bulk_in_address;
+        device.mass_storage_bulk_out_address = descriptor.bulk_out_address;
+        device.mass_storage_bulk_in_id = bulk_in_id;
+        device.mass_storage_bulk_out_id = bulk_out_id;
+        device.mass_storage_bulk_in_max_packet_size = descriptor.bulk_in_max_packet_size;
+        device.mass_storage_bulk_out_max_packet_size = descriptor.bulk_out_max_packet_size;
+        device.mass_storage_bulk_in_ring = Some(bulk_in_ring);
+        device.mass_storage_bulk_out_ring = Some(bulk_out_ring);
+        device.mass_storage_bulk_in_buffer = Some(bulk_in_buffer);
+        device.mass_storage_csw_buffer = Some(csw_buffer);
+        device.mass_storage_bulk_out_buffer = Some(bulk_out_buffer);
+
+        self.info.mass_storage_ready = true;
+        self.info.mass_storage_interface = descriptor.interface_number;
+        self.info.mass_storage_bulk_in = descriptor.bulk_in_address;
+        self.info.mass_storage_bulk_out = descriptor.bulk_out_address;
+        self.info.mass_storage_bulk_in_dci = bulk_in_id;
+        self.info.mass_storage_bulk_out_dci = bulk_out_id;
+        self.info.mass_storage_bulk_in_packet = descriptor.bulk_in_max_packet_size;
+        self.info.mass_storage_bulk_out_packet = descriptor.bulk_out_max_packet_size;
+        Ok(())
+    }
+
+    fn enumerate_first_device(
         &mut self,
         frame_allocator: &mut BitmapFrameAllocator,
         physical_memory_offset: u64,
@@ -1930,23 +2294,242 @@ impl XhciController {
                 usize::from(total_length),
             )
         };
-        let hid = parse_hid_keyboard_configuration(configuration)?;
+        match parse_hid_keyboard_configuration(configuration) {
+            Ok(hid) => {
+                self.control_transfer(UsbSetupPacket::new(
+                    USB_REQUEST_TYPE_DEVICE_OUT,
+                    USB_REQUEST_SET_CONFIGURATION,
+                    u16::from(hid.configuration_value),
+                    0,
+                    0,
+                ))?;
+                self.control_transfer(UsbSetupPacket::new(
+                    USB_REQUEST_TYPE_HID_INTERFACE_OUT,
+                    HID_REQUEST_SET_PROTOCOL,
+                    0,
+                    u16::from(hid.interface_number),
+                    0,
+                ))?;
+                self.configure_hid_endpoint(frame_allocator, physical_memory_offset, hid)
+            }
+            Err(XhciInitError::HidKeyboardNotFound) => {
+                let storage = parse_mass_storage_configuration(configuration)?;
+                self.control_transfer(UsbSetupPacket::new(
+                    USB_REQUEST_TYPE_DEVICE_OUT,
+                    USB_REQUEST_SET_CONFIGURATION,
+                    u16::from(storage.configuration_value),
+                    0,
+                    0,
+                ))?;
+                self.configure_mass_storage_endpoints(
+                    frame_allocator,
+                    physical_memory_offset,
+                    storage,
+                )
+            }
+            Err(error) => Err(error),
+        }
+    }
 
+    fn submit_bulk_transfer(
+        &mut self,
+        direction: TransferDirection,
+        length: u16,
+        buffer: DmaRegion,
+    ) -> Result<(u16, DmaRegion), XhciInitError> {
+        if self.events.transfer.is_some() {
+            return Err(XhciInitError::Busy);
+        }
+        if length == 0 || usize::from(length) > FRAME_SIZE {
+            return Err(XhciInitError::InvalidTransferCompletion);
+        }
+        let (ring, mut cursor, endpoint_id, owner, slot_id) = {
+            let device = self
+                .first_device
+                .as_ref()
+                .ok_or(XhciInitError::MassStorageNotFound)?;
+            match direction {
+                TransferDirection::In => (
+                    device
+                        .mass_storage_bulk_in_ring
+                        .ok_or(XhciInitError::MassStorageNotFound)?,
+                    device.mass_storage_bulk_in_cursor,
+                    device.mass_storage_bulk_in_id,
+                    TransferOwner::BulkIn,
+                    device.slot_id,
+                ),
+                TransferDirection::Out => (
+                    device
+                        .mass_storage_bulk_out_ring
+                        .ok_or(XhciInitError::MassStorageNotFound)?,
+                    device.mass_storage_bulk_out_cursor,
+                    device.mass_storage_bulk_out_id,
+                    TransferOwner::BulkOut,
+                    device.slot_id,
+                ),
+                TransferDirection::None => return Err(XhciInitError::InvalidTransferCompletion),
+            }
+        };
+        let final_pointer = enqueue_transfer_td(
+            ring,
+            &mut cursor,
+            &[Trb::normal(buffer.physical_start(), length)],
+        )?;
+        let device = self
+            .first_device
+            .as_mut()
+            .ok_or(XhciInitError::MassStorageNotFound)?;
+        match direction {
+            TransferDirection::In => device.mass_storage_bulk_in_cursor = cursor,
+            TransferDirection::Out => device.mass_storage_bulk_out_cursor = cursor,
+            TransferDirection::None => unreachable!(),
+        }
+        self.events.transfer = Some(PendingTransfer {
+            owner,
+            trb_pointer: final_pointer,
+            short_packet_pointer: None,
+            slot_id,
+            endpoint_id,
+            requested_length: length,
+            completion: None,
+        });
+        fence(Ordering::Release);
+        write_mmio_u32(
+            self.info.mmio,
+            self.layout.doorbell_base + u64::from(slot_id) * 4,
+            u32::from(endpoint_id),
+        )?;
+        self.wait_for_transfer(owner).map(|actual| (actual, buffer))
+    }
+
+    fn bulk_out(&mut self, data: &[u8]) -> Result<u16, XhciInitError> {
+        let length = u16::try_from(data.len()).map_err(|_| XhciInitError::DescriptorTooLarge)?;
+        let buffer = self
+            .first_device
+            .as_ref()
+            .and_then(|device| device.mass_storage_bulk_out_buffer)
+            .ok_or(XhciInitError::MassStorageNotFound)?;
+        copy_to_dma(buffer, data)?;
+        let (actual, _) = self.submit_bulk_transfer(TransferDirection::Out, length, buffer)?;
+        Ok(actual)
+    }
+
+    fn bulk_in(&mut self, output: &mut [u8]) -> Result<u16, XhciInitError> {
+        let buffer = self
+            .first_device
+            .as_ref()
+            .and_then(|device| device.mass_storage_bulk_in_buffer)
+            .ok_or(XhciInitError::MassStorageNotFound)?;
+        self.bulk_in_with_buffer(output, buffer)
+    }
+
+    fn bulk_in_csw(&mut self, output: &mut [u8]) -> Result<u16, XhciInitError> {
+        let buffer = self
+            .first_device
+            .as_ref()
+            .and_then(|device| device.mass_storage_csw_buffer)
+            .ok_or(XhciInitError::MassStorageNotFound)?;
+        self.bulk_in_with_buffer(output, buffer)
+    }
+
+    fn bulk_in_with_buffer(
+        &mut self,
+        output: &mut [u8],
+        buffer: DmaRegion,
+    ) -> Result<u16, XhciInitError> {
+        let length = u16::try_from(output.len()).map_err(|_| XhciInitError::DescriptorTooLarge)?;
+        clear_dma(buffer, output.len())?;
+        let (actual, completed_buffer) =
+            self.submit_bulk_transfer(TransferDirection::In, length, buffer)?;
+        copy_from_dma(completed_buffer, &mut output[..usize::from(actual)])?;
+        Ok(actual)
+    }
+
+    fn synchronize_mass_storage_endpoint(&mut self, endpoint_id: u8) -> Result<(), XhciInitError> {
+        let (device_context, slot_id, ring, cursor) = {
+            let device = self
+                .first_device
+                .as_ref()
+                .ok_or(XhciInitError::MassStorageNotFound)?;
+            let (ring, cursor) = if endpoint_id == device.mass_storage_bulk_in_id {
+                (
+                    device
+                        .mass_storage_bulk_in_ring
+                        .ok_or(XhciInitError::MassStorageNotFound)?,
+                    device.mass_storage_bulk_in_cursor,
+                )
+            } else if endpoint_id == device.mass_storage_bulk_out_id {
+                (
+                    device
+                        .mass_storage_bulk_out_ring
+                        .ok_or(XhciInitError::MassStorageNotFound)?,
+                    device.mass_storage_bulk_out_cursor,
+                )
+            } else {
+                return Err(XhciInitError::InvalidCapabilities);
+            };
+            (device.device_context, device.slot_id, ring, cursor)
+        };
+        // A Device Context begins with the Slot Context, so DCI N is context
+        // index N. Only Input Contexts have the leading Input Control Context
+        // that shifts endpoint indices by one.
+        let endpoint_context = self.context_size * usize::from(endpoint_id);
+        let state = read_dma_u32(device_context, endpoint_context)? & 0x7;
+        if state != 2 {
+            return Ok(());
+        }
+        self.submit_command(Trb::reset_endpoint_command(slot_id, endpoint_id))?;
+        let offset = cursor
+            .enqueue_index
+            .checked_mul(core::mem::size_of::<Trb>())
+            .ok_or(XhciInitError::InvalidCapabilities)?;
+        let dequeue = ring
+            .physical_at(offset)
+            .ok_or(XhciInitError::InvalidCapabilities)?
+            | u64::from(cursor.cycle);
+        self.submit_command(Trb::set_tr_dequeue_pointer_command(
+            dequeue,
+            slot_id,
+            endpoint_id,
+        ))?;
+        Ok(())
+    }
+
+    fn reset_mass_storage_transport(&mut self) -> Result<(), XhciInitError> {
+        if self.events.transfer.is_some() {
+            return Err(XhciInitError::Busy);
+        }
+        let (interface, bulk_in_address, bulk_out_address, bulk_in_id, bulk_out_id) = {
+            let device = self
+                .first_device
+                .as_ref()
+                .ok_or(XhciInitError::MassStorageNotFound)?;
+            (
+                device.mass_storage_interface,
+                device.mass_storage_bulk_in_address,
+                device.mass_storage_bulk_out_address,
+                device.mass_storage_bulk_in_id,
+                device.mass_storage_bulk_out_id,
+            )
+        };
         self.control_transfer(UsbSetupPacket::new(
-            USB_REQUEST_TYPE_DEVICE_OUT,
-            USB_REQUEST_SET_CONFIGURATION,
-            u16::from(hid.configuration_value),
+            USB_REQUEST_TYPE_CLASS_INTERFACE_OUT,
+            MASS_STORAGE_REQUEST_RESET,
             0,
+            u16::from(interface),
             0,
         ))?;
-        self.control_transfer(UsbSetupPacket::new(
-            USB_REQUEST_TYPE_HID_INTERFACE_OUT,
-            HID_REQUEST_SET_PROTOCOL,
-            0,
-            u16::from(hid.interface_number),
-            0,
-        ))?;
-        self.configure_hid_endpoint(frame_allocator, physical_memory_offset, hid)
+        for endpoint_address in [bulk_in_address, bulk_out_address] {
+            self.control_transfer(UsbSetupPacket::new(
+                USB_REQUEST_TYPE_ENDPOINT_OUT,
+                USB_REQUEST_CLEAR_FEATURE,
+                USB_FEATURE_ENDPOINT_HALT,
+                u16::from(endpoint_address),
+                0,
+            ))?;
+        }
+        self.synchronize_mass_storage_endpoint(bulk_in_id)?;
+        self.synchronize_mass_storage_endpoint(bulk_out_id)
     }
 
     fn arm_hid_transfer(&mut self) -> Result<(), XhciInitError> {
@@ -2134,7 +2717,7 @@ impl XhciController {
         self.info.addressed_slot = slot_id;
         self.info.addressed_speed_id = speed_id;
         self.first_device = Some(device);
-        self.enumerate_hid_keyboard(frame_allocator, physical_memory_offset)
+        self.enumerate_first_device(frame_allocator, physical_memory_offset)
     }
 }
 
@@ -2169,6 +2752,64 @@ pub fn poll_hid_once() {
         );
         crate::tty::TTY.lock().on_char(character);
     }
+}
+
+/// Return the configured Bulk-Only transport endpoints for the first device.
+pub fn mass_storage_transport_info() -> Option<MassStorageTransportInfo> {
+    let controller = XHCI_CONTROLLER.get()?;
+    let controller = controller.lock();
+    if !controller.info.mass_storage_ready {
+        return None;
+    }
+    let device = controller.first_device.as_ref()?;
+    Some(MassStorageTransportInfo {
+        slot_id: device.slot_id,
+        interface_number: device.mass_storage_interface,
+        bulk_in_address: device.mass_storage_bulk_in_address,
+        bulk_out_address: device.mass_storage_bulk_out_address,
+        bulk_in_max_packet_size: device.mass_storage_bulk_in_max_packet_size,
+        bulk_out_max_packet_size: device.mass_storage_bulk_out_max_packet_size,
+    })
+}
+
+/// Submit one synchronous Mass Storage Bulk OUT stage.
+#[cfg(target_os = "none")]
+pub fn mass_storage_bulk_out(data: &[u8]) -> Result<u16, XhciInitError> {
+    XHCI_CONTROLLER
+        .get()
+        .ok_or(XhciInitError::MassStorageNotFound)?
+        .lock()
+        .bulk_out(data)
+}
+
+/// Submit one synchronous Mass Storage Bulk IN stage.
+#[cfg(target_os = "none")]
+pub fn mass_storage_bulk_in(output: &mut [u8]) -> Result<u16, XhciInitError> {
+    XHCI_CONTROLLER
+        .get()
+        .ok_or(XhciInitError::MassStorageNotFound)?
+        .lock()
+        .bulk_in(output)
+}
+
+/// Submit the CSW stage through its dedicated DMA buffer on Bulk IN.
+#[cfg(target_os = "none")]
+pub fn mass_storage_bulk_in_csw(output: &mut [u8]) -> Result<u16, XhciInitError> {
+    XHCI_CONTROLLER
+        .get()
+        .ok_or(XhciInitError::MassStorageNotFound)?
+        .lock()
+        .bulk_in_csw(output)
+}
+
+/// Run the USB Mass Storage Bulk-Only Reset Recovery sequence.
+#[cfg(target_os = "none")]
+pub fn reset_mass_storage_transport() -> Result<(), XhciInitError> {
+    XHCI_CONTROLLER
+        .get()
+        .ok_or(XhciInitError::MassStorageNotFound)?
+        .lock()
+        .reset_mass_storage_transport()
 }
 
 /// Discover, reset and start the first xHCI controller with polling rings.
@@ -2454,6 +3095,19 @@ mod tests {
         assert_eq!(endpoint_zero_max_packet_size(1), 8);
         assert_eq!(endpoint_zero_max_packet_size(3), 64);
         assert_eq!(endpoint_zero_max_packet_size(4), 512);
+
+        let reset = Trb::reset_endpoint_command(9, 4);
+        assert_eq!(reset.trb_type(), TRB_TYPE_RESET_ENDPOINT_COMMAND);
+        assert_eq!(reset.slot_id(), 9);
+        assert_eq!(reset.endpoint_id(), 4);
+        let set_dequeue = Trb::set_tr_dequeue_pointer_command(0x4321_0001, 9, 5);
+        assert_eq!(
+            set_dequeue.trb_type(),
+            TRB_TYPE_SET_TR_DEQUEUE_POINTER_COMMAND
+        );
+        assert_eq!(set_dequeue.parameter, 0x4321_0001);
+        assert_eq!(set_dequeue.slot_id(), 9);
+        assert_eq!(set_dequeue.endpoint_id(), 5);
     }
 
     #[test]
@@ -2534,6 +3188,61 @@ mod tests {
                 max_packet_size: 8,
                 interval: 10,
             })
+        );
+    }
+
+    #[test]
+    fn parses_strict_mass_storage_bulk_endpoint_pair() {
+        let configuration = [
+            9, 2, 32, 0, 1, 2, 0, 0x80, 50, // Configuration
+            9, 4, 3, 0, 2, 8, 6, 0x50, 0, // SCSI/BOT interface
+            7, 5, 0x82, 2, 0, 2, 0, // Bulk IN endpoint 2, 512 bytes
+            7, 5, 0x02, 2, 0, 2, 0, // Bulk OUT endpoint 2, 512 bytes
+        ];
+        assert_eq!(
+            parse_mass_storage_configuration(&configuration),
+            Ok(MassStorageDescriptor {
+                configuration_value: 2,
+                interface_number: 3,
+                bulk_in_address: 0x82,
+                bulk_in_max_packet_size: 512,
+                bulk_out_address: 0x02,
+                bulk_out_max_packet_size: 512,
+            })
+        );
+        assert_eq!(endpoint_id(0x02), Some(4));
+        assert_eq!(endpoint_id(0x82), Some(5));
+
+        let mut duplicate_in = configuration;
+        duplicate_in[27] = 0x83;
+        assert_eq!(
+            parse_mass_storage_configuration(&duplicate_in),
+            Err(XhciInitError::InvalidDescriptor)
+        );
+        let mut zero_packet = configuration;
+        zero_packet[22] = 0;
+        zero_packet[23] = 0;
+        assert_eq!(
+            parse_mass_storage_configuration(&zero_packet),
+            Err(XhciInitError::InvalidDescriptor)
+        );
+        let mut wrong_protocol = configuration;
+        wrong_protocol[16] = 0x62;
+        assert_eq!(
+            parse_mass_storage_configuration(&wrong_protocol),
+            Err(XhciInitError::MassStorageNotFound)
+        );
+        let mut wrong_endpoint_count = configuration;
+        wrong_endpoint_count[13] = 1;
+        assert_eq!(
+            parse_mass_storage_configuration(&wrong_endpoint_count),
+            Err(XhciInitError::InvalidDescriptor)
+        );
+        let mut reserved_endpoint_address = configuration;
+        reserved_endpoint_address[20] = 0x92;
+        assert_eq!(
+            parse_mass_storage_configuration(&reserved_endpoint_address),
+            Err(XhciInitError::InvalidDescriptor)
         );
     }
 

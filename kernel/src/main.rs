@@ -42,8 +42,8 @@ mod pic;
 use brane_os_kernel::serial_println;
 use brane_os_kernel::{
     acpi, ai, apic, audit, block, brane, dns, fat32, framebuffer, gdt, ipc, memory, module_loader,
-    net, pci, process, ramfs, sched, security, serial, shell, smp, socket, syscall, tty, usermode,
-    vfs, virtio, virtio_block, xhci,
+    net, pci, process, ramfs, sched, security, serial, shell, smp, socket, syscall, tty,
+    usb_storage, usermode, vfs, virtio, virtio_block, xhci,
 };
 
 // -----------------------------------------------------------------------
@@ -705,6 +705,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         pci_buses,
         pci_overflowed,
     );
+    let mut xhci_mass_storage_ready = false;
     match xhci::init(&mut mapper, &mut frame_alloc, phys_offset) {
         Ok(Some(controller)) => {
             serial_println!(
@@ -765,6 +766,20 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                     controller.hid_interval,
                 );
             }
+            if controller.mass_storage_ready {
+                xhci_mass_storage_ready = true;
+                serial_println!(
+                    "[xhci] Mass storage ready: slot={}, interface={}, bulk_in=0x{:02X}, in_dci={}, in_packet={}, bulk_out=0x{:02X}, out_dci={}, out_packet={}",
+                    controller.addressed_slot,
+                    controller.mass_storage_interface,
+                    controller.mass_storage_bulk_in,
+                    controller.mass_storage_bulk_in_dci,
+                    controller.mass_storage_bulk_in_packet,
+                    controller.mass_storage_bulk_out,
+                    controller.mass_storage_bulk_out_dci,
+                    controller.mass_storage_bulk_out_packet,
+                );
+            }
         }
         Ok(None) => {
             serial_println!("[xhci] No xHCI controller found.");
@@ -774,6 +789,35 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         }
     }
     let mut boot_block_id = None;
+    let mut usb_block_id = None;
+    if xhci_mass_storage_ready {
+        match usb_storage::init() {
+            Ok(device) => {
+                serial_println!(
+                    "[usb-storage] LUN 0: blocks={}, block_size=512, read_only=true",
+                    device.capacity_blocks(),
+                );
+                let registration = block::BLOCK_REGISTRY.lock().register(device);
+                match registration {
+                    Ok(id) => {
+                        usb_block_id = Some(id);
+                        serial_println!(
+                            "[block] usb-storage0 ready: id={}, sectors={}, bytes={}, read_only=true",
+                            id,
+                            device.capacity_blocks(),
+                            device.capacity_blocks().saturating_mul(512),
+                        );
+                    }
+                    Err(error) => {
+                        serial_println!("[block] usb-storage0 registration failed: {:?}", error,);
+                    }
+                }
+            }
+            Err(error) => {
+                serial_println!("[usb-storage] LUN 0 initialization failed: {:?}", error);
+            }
+        }
+    }
     if let Some(controller) = virtio::find_virtio_block() {
         match virtio_block::init(controller, &mut frame_alloc, phys_offset) {
             Ok(device) => {
@@ -870,6 +914,52 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             }
             Err(error) => {
                 serial_println!("[fat32] No mountable volume: {:?}", error);
+            }
+        }
+    }
+    if let Some(id) = usb_block_id {
+        let mut sector = [0u8; block::MIN_BLOCK_SIZE as usize];
+        let usb_handle = block::BLOCK_REGISTRY.lock().handle(id);
+        let read_result = usb_handle
+            .ok_or(block::BlockError::InvalidDevice)
+            .and_then(|device| device.read(0, &mut sector));
+        if let Err(error) = read_result {
+            serial_println!("[block] USB LBA0 read probe failed: {:?}", error);
+        } else {
+            serial_println!("[block] USB LBA0 read probe: ok");
+        }
+
+        match fat32::Fat32Fs::mount(id) {
+            Ok(filesystem) => {
+                serial_println!(
+                    "[fat32] USB volume ready: mount=/usb, device={}, label={}, partition_lba={}, root_cluster={}",
+                    filesystem.device_id(),
+                    filesystem.volume_label(),
+                    filesystem.partition_lba(),
+                    filesystem.root_cluster(),
+                );
+                let filesystem = Box::leak(Box::new(filesystem));
+                let filesystem_ref: &mut dyn vfs::FileSystem = filesystem;
+                let mount_result = unsafe { vfs::VFS.lock().mount("/usb", filesystem_ref) };
+                match mount_result {
+                    Ok(()) => {
+                        let mut probe = [0u8; 64];
+                        let result = vfs::VFS.lock().read("/usb/README.TXT", 0, &mut probe);
+                        let valid = matches!(result, Ok(bytes) if probe[..bytes]
+                            .starts_with(b"Brane OS USB storage path ready.\n"));
+                        if valid {
+                            serial_println!("[fat32] Read probe: /usb/README.TXT ok");
+                        } else {
+                            serial_println!("[fat32] USB read probe failed: {:?}", result,);
+                        }
+                    }
+                    Err(error) => {
+                        serial_println!("[fat32] Mount at /usb failed: {:?}", error);
+                    }
+                }
+            }
+            Err(error) => {
+                serial_println!("[fat32] No mountable USB volume: {:?}", error);
             }
         }
     }

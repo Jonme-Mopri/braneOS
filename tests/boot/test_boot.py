@@ -187,8 +187,15 @@ class QmpClient:
         self.connection.close()
 
 
-def write_fat32_test_disk(disk: BinaryIO) -> None:
+def write_fat32_test_disk(
+    disk: BinaryIO,
+    *,
+    volume_label: bytes = b"BRANEOS    ",
+    readme_prefix: bytes = b"Brane OS FAT32 block path ready.\n",
+) -> None:
     """Create a deterministic sparse FAT32 superfloppy without host tools."""
+    if len(volume_label) != 11:
+        raise ValueError("FAT32 volume label must contain exactly 11 bytes")
     sector_size = 512
     total_sectors = 131_072
     reserved_sectors = 32
@@ -238,7 +245,7 @@ def write_fat32_test_disk(disk: BinaryIO) -> None:
     boot[64] = 0x80
     boot[66] = 0x29
     put_u32(boot, 67, 0xB4A93201)
-    boot[71:82] = b"BRANEOS    "
+    boot[71:82] = volume_label
     boot[82:90] = b"FAT32   "
     boot[510:512] = b"\x55\xAA"
     write_sector(0, boot)
@@ -259,7 +266,6 @@ def write_fat32_test_disk(disk: BinaryIO) -> None:
         put_u32(fat, cluster * 4, value)
     write_sector(reserved_sectors, fat)
 
-    readme_prefix = b"Brane OS FAT32 block path ready.\n"
     readme_tail = b"FAT32-CHAIN-OK\n"
     readme = readme_prefix + b" " * (sector_size - len(readme_prefix)) + readme_tail
     hello = b"hello from a nested FAT32 directory\n"
@@ -359,6 +365,7 @@ def run_qemu_test(
     cpus: int = 1,
     machine: str | None = None,
     usb_hid: bool = False,
+    usb_storage: bool = False,
 ) -> int:
     """
     Launch QEMU with the given disk image or ISO, capture serial output,
@@ -368,6 +375,9 @@ def run_qemu_test(
     if machine:
         cmd.extend(["-machine", machine])
     required_strings = list(REQUIRED_STRINGS)
+    if usb_storage:
+        required_strings.remove("[block] Block layer ready: 1 registered device(s)")
+        required_strings.append("[block] Block layer ready: 2 registered device(s)")
     if machine == "q35":
         required_strings.extend([
             "[acpi] MCFG:",
@@ -376,9 +386,25 @@ def run_qemu_test(
             "[xhci] Runtime ready: reset=ok, running=true, command_probe=ok",
             "[xhci] Ports ready: protocols=2, connected=1",
             "[xhci] Device addressed: slot=1",
-            "[xhci] Device descriptor: vid=0x0627, pid=0x0001",
-            "[xhci] HID keyboard ready: slot=1, interface=0, endpoint=0x81",
         ])
+        if usb_storage:
+            required_strings.extend([
+                "[xhci] Device descriptor:",
+                "[xhci] Mass storage ready: slot=1",
+                "bulk_in=0x81",
+                "bulk_out=0x02",
+                "[usb-storage] LUN 0: blocks=131072, block_size=512, read_only=true",
+                "[block] usb-storage0 ready: id=1",
+                "[block] USB LBA0 read probe: ok",
+                "[fat32] USB volume ready: mount=/usb",
+                "label=BRANEUSB",
+                "[fat32] Read probe: /usb/README.TXT ok",
+            ])
+        else:
+            required_strings.extend([
+                "[xhci] Device descriptor: vid=0x0627, pid=0x0001",
+                "[xhci] HID keyboard ready: slot=1, interface=0, endpoint=0x81",
+            ])
     if usb_hid:
         required_strings.append(
             "[xhci] HID report received: slot=1, endpoint=0x81, len=8, key=u"
@@ -395,6 +421,7 @@ def run_qemu_test(
         ])
     firmware_vars: Path | None = None
     block_path: Path | None = None
+    usb_storage_path: Path | None = None
     qmp_tempdir = None
     qmp_path: Path | None = None
     if media_type == "iso":
@@ -425,10 +452,25 @@ def run_qemu_test(
         "-device", "virtio-blk-pci,drive=braneblk,disable-modern=on",
     ])
     if machine == "q35":
-        cmd.extend([
-            "-device", "qemu-xhci,id=branexhci",
-            "-device", "usb-kbd,bus=branexhci.0",
-        ])
+        cmd.extend(["-device", "qemu-xhci,id=branexhci"])
+        if usb_storage:
+            with tempfile.NamedTemporaryFile(
+                prefix="brane-usb-storage-", suffix=".img", delete=False
+            ) as disk:
+                usb_storage_path = Path(disk.name)
+                write_fat32_test_disk(
+                    disk,
+                    volume_label=b"BRANEUSB   ",
+                    readme_prefix=b"Brane OS USB storage path ready.\n",
+                )
+            cmd.extend([
+                "-drive",
+                f"if=none,id=usbstick,format=raw,readonly=on,file={usb_storage_path}",
+                "-device",
+                "usb-storage,bus=branexhci.0,drive=usbstick",
+            ])
+        else:
+            cmd.extend(["-device", "usb-kbd,bus=branexhci.0"])
     if usb_hid:
         # Keep the AF_UNIX path below macOS' short sockaddr_un limit.
         qmp_tempdir = tempfile.TemporaryDirectory(prefix="bhid-", dir="/tmp")
@@ -464,6 +506,8 @@ def run_qemu_test(
             firmware_vars.unlink(missing_ok=True)
         if block_path:
             block_path.unlink(missing_ok=True)
+        if usb_storage_path:
+            usb_storage_path.unlink(missing_ok=True)
         if qmp_tempdir:
             qmp_tempdir.cleanup()
         return 2
@@ -562,6 +606,8 @@ def run_qemu_test(
         firmware_vars.unlink(missing_ok=True)
     if block_path:
         block_path.unlink(missing_ok=True)
+    if usb_storage_path:
+        usb_storage_path.unlink(missing_ok=True)
     if qmp_tempdir:
         qmp_tempdir.cleanup()
 
@@ -603,6 +649,8 @@ def parse_args() -> argparse.Namespace:
                    help="QEMU machine type; q35 validates the PCIe ECAM path")
     p.add_argument("--usb-hid", action="store_true",
                    help="Inject a key over QMP and require the xHCI HID/TTY path")
+    p.add_argument("--usb-storage", action="store_true",
+                   help="Attach a read-only USB BOT/SCSI FAT32 disk and require /usb")
     media = p.add_mutually_exclusive_group()
     media.add_argument("--img", type=str, default=None,
                        help="Path to existing .img file, skips build entirely")
@@ -619,6 +667,12 @@ def main() -> None:
         sys.exit(2)
     if args.usb_hid and args.machine != "q35":
         error("--usb-hid requires --machine q35")
+        sys.exit(2)
+    if args.usb_storage and args.machine != "q35":
+        error("--usb-storage requires --machine q35")
+        sys.exit(2)
+    if args.usb_hid and args.usb_storage:
+        error("--usb-hid and --usb-storage are mutually exclusive until xHCI supports multiple slots")
         sys.exit(2)
     start = time.monotonic()
 
@@ -651,6 +705,7 @@ def main() -> None:
         args.cpus,
         args.machine,
         args.usb_hid,
+        args.usb_storage,
     )
 
     elapsed = time.monotonic() - start

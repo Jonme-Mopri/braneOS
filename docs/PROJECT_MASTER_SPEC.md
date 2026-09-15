@@ -36,7 +36,7 @@ definen en [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md).
 - [x] Prototipo de IA actuadora restringida (no habilitado para producción)
 - [x] SMP/APIC en entorno emulado
 - [x] Almacenamiento virtio-blk + FAT32 read-only
-- [ ] USB HID y USB mass storage completos
+- [x] USB HID y USB mass storage read-only completos en QEMU/Q35
 - [ ] Gate físico y publicación v1.0
 
 ---
@@ -774,7 +774,7 @@ A partir de este documento se deberán crear y mantener:
 - [x] `RELEASE.md`
 - [x] `HARDWARE_MATRIX.md`
 - [x] `USB_XHCI.md` (implementación y evidencia del octavo corte de la Fase 13)
-- [x] `USB_STORAGE.md` (diseño del noveno corte de la Fase 13)
+- [x] `USB_STORAGE.md` (implementación y evidencia del noveno corte de la Fase 13)
 - [x] `PCI_INTERRUPTS.md` (diseño del décimo corte de la Fase 13)
 - [x] `SYSCALL_SECURITY.md` (prerrequisito de aislamiento de la Fase 14)
 - [x] `IPC_RUNTIME.md` (endpoints y wait queues de servicios de la Fase 14)
@@ -798,8 +798,8 @@ A partir de este documento se deberán crear y mantener:
 | Plano de control de seguridad | 🔲 Propuesta | ADR-010 define roles audit → identity → policy → broker y commit kernel |
 | Runtime IA | 🟡 Prototipo | `ai.rs` observa strings sintéticos en kernel; ADR-011 define migración y leases pendientes |
 | Package manager | 🔲 Propuesta | ADR-012 define `.bpkg`, roles TUF, store inmutable y activation transaccional |
-| Persistencia | 🟡 Parcial | Lectura FAT32 real; escrituras, journal y política de montaje pendientes |
-| Eventos xHCI | 🔲 Propuesta | ADR-006 define despachador único, correlación y polling acotado para completar USB HID |
+| Persistencia | 🟡 Parcial | FAT32 read-only sobre virtio-blk y USB BOT/SCSI; escrituras, journal y política de montaje pendientes |
+| Eventos xHCI | ✅ Baseline | ADR-006 gobierna el dispatcher único usado por control, HID y Mass Storage Bulk; polling acotado |
 | Interrupciones PCI | 🔲 Propuesta | ADR-007 y `PCI_INTERRUPTS.md` definen MSI-X → MSI → polling, vectores fijos y trabajo diferido |
 | Filesystem inicial | ✅ Baseline | VFS + RamFS + FAT32 read-only; evolución documentada en arquitectura |
 | Networking inicial | ✅ Baseline | virtio-net, Ethernet/ARP/IPv4, TCP/UDP, sockets y DNS estático |
