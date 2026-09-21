@@ -79,6 +79,8 @@ All notable changes to Brane OS are documented here. The project follows
   no-mutation failure behavior.
 - IDT wrappers for the complete PCI vector range with release/acquire pending
   bits and a constant-time top half that defers device work.
+- Deferred xHCI Event Ring service after `hlt`, bounded by the existing runtime
+  event budget and followed by the normal HID completion/rearm path.
 
 ## 0.1.0 — Foundation
 

@@ -19,7 +19,7 @@ una descripción de diseño no implica por sí sola que exista código ejecutabl
 | SMP/APIC | ✅ 4 vCPU en QEMU/TCG | Validación física |
 | Almacenamiento | ✅ virtio-blk y USB BOT/SCSI + FAT32 read-only | Escritura persistente |
 | USB/xHCI | ✅ HID y Mass Storage operativos en Q35 | MSI/MSI-X, múltiples slots y hotplug |
-| Interrupciones PCI | 🟡 Programación host + wrappers IDT | Config space/MMIO real y xHCI por MSI/MSI-X |
+| Interrupciones PCI | 🟡 Wrappers IDT + dispatcher xHCI diferido | Config space/MMIO real y xHCI por MSI/MSI-X |
 | Release | 🟡 Artefactos y automatización listos | Matriz física y tag v1.0 |
 
 El foco de implementación vigente es la **Fase 13**: migrar el dispatcher xHCI

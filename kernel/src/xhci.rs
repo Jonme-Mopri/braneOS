@@ -2754,6 +2754,40 @@ pub fn poll_hid_once() {
     }
 }
 
+/// Drain events signalled by PCI vector 0x40 outside interrupt context. The
+/// existing HID routine remains responsible for consuming completions and
+/// rearming the endpoint; this function only advances the single Event Ring
+/// consumer so an interrupt cannot execute protocol work in the top half.
+#[cfg(target_os = "none")]
+pub fn service_interrupt_once() {
+    if !pci::take_interrupt_pending(pci::PCI_VECTOR_FIRST) {
+        return;
+    }
+    let result = {
+        let Some(controller) = XHCI_CONTROLLER.get() else {
+            return;
+        };
+        let mut controller = controller.lock();
+        let mut handled = 0usize;
+        let result = (|| {
+            while handled < RUNTIME_EVENT_BUDGET && controller.dispatch_one_event()? {
+                handled += 1;
+            }
+            Ok::<usize, XhciInitError>(handled)
+        })();
+        (result, handled)
+    };
+    match result {
+        (Ok(handled), _) if handled != 0 => {
+            crate::serial_println!("[xhci] deferred interrupt dispatch: events={}", handled);
+        }
+        (Ok(_), _) => {}
+        (Err(error), _) => {
+            crate::serial_println!("[xhci] deferred interrupt dispatch failed: {:?}", error);
+        }
+    }
+}
+
 /// Return the configured Bulk-Only transport endpoints for the first device.
 pub fn mass_storage_transport_info() -> Option<MassStorageTransportInfo> {
     let controller = XHCI_CONTROLLER.get()?;

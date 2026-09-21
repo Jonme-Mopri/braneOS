@@ -276,8 +276,11 @@ operaciones al config space/MMIO real y al dispatcher xHCI.
 La IDT ya instala wrappers para todo `0x40..=0x4F`. Cada top half sólo marca un
 bit pendiente con `Release` y emite EOI; `take_interrupt_pending` lo retira con
 `Acquire`, dejando el consumo del Event Ring fuera del contexto de interrupción.
-La ruta no arma todavía MSI/MSI-X en hardware, por lo que el arranque conserva
-polling hasta que el consumidor xHCI complete la transacción de configuración.
+El bucle de la shell llama a `xhci::service_interrupt_once()` después de cada
+`hlt`; esa rutina drena hasta `RUNTIME_EVENT_BUDGET` eventos y deja que
+`poll_hid_once()` procese la completion y rearme el endpoint. La ruta no arma
+todavía MSI/MSI-X en hardware, por lo que el arranque conserva polling hasta
+que el consumidor xHCI complete la transacción de configuración.
 
 ## 13. Estrategia de pruebas
 

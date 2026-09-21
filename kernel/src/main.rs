@@ -1007,6 +1007,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Shell loop: wait for keyboard input, process commands
     loop {
         x86_64::instructions::hlt(); // Wait for interrupt
+        xhci::service_interrupt_once();
         xhci::poll_hid_once();
 
         // Check if a line is ready

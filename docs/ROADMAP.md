@@ -279,7 +279,7 @@ físico se mantiene en la matriz de release de la Fase 11.
 | Componente | Estado | Prioridad | Dependencia |
 |-----------|--------|-----------|-------------|
 | Enumeración PCI/PCIe robusta | ✅ | ALTA | ECAM/MCFG con fallback CF8/CFC, bridges, multifunction, BAR 32/64 y apertures MMIO medidas/mapeadas |
-| MSI/MSI-X | 🟡 | MEDIA | Walker, decoders, ownership, modelos transaccionales y wrappers IDT; falta conexión real y fallback |
+| MSI/MSI-X | 🟡 | MEDIA | Walker, decoders, ownership, modelos transaccionales, wrappers IDT y dispatcher xHCI diferido; falta conexión real y fallback |
 | Controlador xHCI | 🔄 | ALTA | Control, interrupt y bulk listos; faltan MSI/MSI-X, múltiples slots y hotplug |
 | USB HID | ✅ | ALTA | Teclado boot protocol → TTY en Q35 con 1/4 vCPU; ratón fuera de la baseline |
 | USB mass storage | ✅ | MEDIA | BOT/SCSI LUN 0 read-only → `usb-storage0` → FAT32 `/usb`, Q35 1/4 vCPU |
@@ -387,7 +387,7 @@ BIR y offsets de tabla/PBA), y construye el mensaje físico xAPIC para el rango
 reservado `0x40..=0x4F`. Doce pruebas PCI cubren el walker, decoders, ciclos,
 límites vectoriales y ownership sin duplicados. El siguiente incremento
 implementará la conexión de los writes transaccionales al config space/MMIO y
-el consumo diferido desde xHCI, conservando fallback MSI/polling.
+el armado MSI-X/MSI desde xHCI, conservando fallback polling.
 
 ---
 
