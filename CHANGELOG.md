@@ -69,6 +69,16 @@ All notable changes to Brane OS are documented here. The project follows
   endpoint dequeue synchronization. Host-side negative tests cover phase
   errors, invalid CSW identity and timeout quarantine without issuing a second
   CBW after failed recovery.
+- PCI conventional capability walker with fail-closed bounds, cycle and
+  truncation checks; MSI/MSI-X decoders; and validated xAPIC MSI message
+  construction for the reserved Phase 13 vector range.
+- Fixed PCI vector ownership registry with duplicate prevention, validated
+  state transitions, and failed-setup release semantics.
+- Transactional host models for MSI and MSI-X programming, including one-message
+  MSI setup, masked MSI-X entry writes, measured-BAR bounds checks, and
+  no-mutation failure behavior.
+- IDT wrappers for the complete PCI vector range with release/acquire pending
+  bits and a constant-time top half that defers device work.
 
 ## 0.1.0 — Foundation
 

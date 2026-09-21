@@ -1,7 +1,7 @@
 # Interrupciones PCI MSI/MSI-X — especificación de implementación
 
 > Fase: **13 — Hardware I/O y almacenamiento**.
-> Estado: **diseño del décimo corte; implementación pendiente**.
+> Estado: **primer corte implementado; programación y entrega todavía pendientes**.
 > Última actualización: **2026-09-12**.
 
 ## 1. Objetivo
@@ -256,6 +256,28 @@ motivo. No conserva `Armed` una ruta cuyo destino APIC ya no sea válido.
 8. Restaurar la ruta después de S3 o demostrar fallback controlado.
 9. Evaluar virtio-blk como segundo consumidor sin habilitar multi-queue.
 10. Registrar evidencia física y decidir si se acepta ADR-007 para v0.1.
+
+### Estado de implementación
+
+El primer incremento ya está en `kernel/src/pci.rs`: el walker de capabilities
+convencionales valida alineación, rango, truncamiento, ciclos y presupuesto sin
+asignaciones; los decoders exponen los campos necesarios de MSI y MSI-X; y el
+constructor de mensajes xAPIC valida el rango reservado `0x40..=0x4F` y el
+destino de ocho bits. Las pruebas host cubren cadenas válidas y malformadas,
+layouts MSI-X y los límites del mensaje APIC. El registry fijo de ownership
+también está implementado: reserva `0x40..=0x4F`, evita duplicados, limita las
+transiciones a estados válidos y libera únicamente una reserva `Failed`. El
+La programación transaccional ya está modelada para una entrada: MSI fuerza un
+solo mensaje y conserva bits no relacionados; MSI-X valida BIR, tamaño de
+entrada y apertura medida antes de escribir enmascarado y publicar el vector.
+Los fallos dejan la entrada intacta. El siguiente incremento conectará estas
+operaciones al config space/MMIO real y al dispatcher xHCI.
+
+La IDT ya instala wrappers para todo `0x40..=0x4F`. Cada top half sólo marca un
+bit pendiente con `Release` y emite EOI; `take_interrupt_pending` lo retira con
+`Acquire`, dejando el consumo del Event Ring fuera del contexto de interrupción.
+La ruta no arma todavía MSI/MSI-X en hardware, por lo que el arranque conserva
+polling hasta que el consumidor xHCI complete la transacción de configuración.
 
 ## 13. Estrategia de pruebas
 

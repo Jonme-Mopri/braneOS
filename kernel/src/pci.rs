@@ -11,6 +11,8 @@
 use spin::Mutex;
 
 #[cfg(target_os = "none")]
+use core::sync::atomic::AtomicU16;
+#[cfg(target_os = "none")]
 use core::sync::atomic::{AtomicU8, Ordering};
 #[cfg(target_os = "none")]
 use x86_64::instructions::port::Port;
@@ -402,6 +404,444 @@ pub struct PciDevice {
     pub interrupt_line: u8,
     pub interrupt_pin: u8,
     pub secondary_bus: Option<u8>,
+}
+
+/// A conventional PCI capability header discovered in configuration space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciCapability {
+    pub id: u8,
+    pub offset: u8,
+}
+
+pub const MAX_PCI_CAPABILITIES: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityError {
+    MissingStatus,
+    MisalignedPointer,
+    PointerOutOfRange,
+    Truncated,
+    Cycle,
+    TooMany,
+}
+
+/// Result of walking the conventional capability list without allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciCapabilities {
+    entries: [Option<PciCapability>; MAX_PCI_CAPABILITIES],
+    count: usize,
+}
+
+impl PciCapabilities {
+    pub const fn empty() -> Self {
+        Self {
+            entries: [None; MAX_PCI_CAPABILITIES],
+            count: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = PciCapability> + '_ {
+        self.entries[..self.count].iter().flatten().copied()
+    }
+
+    pub fn find(&self, id: u8) -> Option<PciCapability> {
+        self.iter().find(|capability| capability.id == id)
+    }
+}
+
+/// Walk the first 256 bytes of conventional PCI configuration space.
+///
+/// A malformed chain is rejected as a whole; callers must not program a
+/// capability found after a bad pointer.
+pub fn walk_capabilities(config: &[u8]) -> Result<PciCapabilities, CapabilityError> {
+    if config.len() < 0x40 {
+        return Err(CapabilityError::MissingStatus);
+    }
+    let status = u16::from_le_bytes([config[0x06], config[0x07]]);
+    if status & (1 << 4) == 0 {
+        return Ok(PciCapabilities::empty());
+    }
+    let mut pointer = config[0x34];
+    let mut visited = [false; 64];
+    let mut result = PciCapabilities::empty();
+    while pointer != 0 {
+        if pointer < 0x40 || pointer > 0xFC || pointer & 3 != 0 {
+            return Err(if pointer & 3 != 0 {
+                CapabilityError::MisalignedPointer
+            } else {
+                CapabilityError::PointerOutOfRange
+            });
+        }
+        let slot = (pointer as usize - 0x40) / 4;
+        if visited[slot] {
+            return Err(CapabilityError::Cycle);
+        }
+        visited[slot] = true;
+        let end = pointer as usize + 2;
+        if end > config.len() {
+            return Err(CapabilityError::Truncated);
+        }
+        if result.count == MAX_PCI_CAPABILITIES {
+            return Err(CapabilityError::TooMany);
+        }
+        result.entries[result.count] = Some(PciCapability {
+            id: config[pointer as usize],
+            offset: pointer,
+        });
+        result.count += 1;
+        pointer = config[pointer as usize + 1];
+    }
+    Ok(result)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiCapability {
+    pub offset: u8,
+    pub is_64_bit: bool,
+    pub per_vector_masking: bool,
+    pub multiple_message_capable: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsixCapability {
+    pub offset: u8,
+    pub table_size: u16,
+    pub table_bir: u8,
+    pub table_offset: u32,
+    pub pba_bir: u8,
+    pub pba_offset: u32,
+}
+
+pub fn decode_msi(
+    config: &[u8],
+    capability: PciCapability,
+) -> Result<MsiCapability, CapabilityError> {
+    if capability.id != 0x05 {
+        return Err(CapabilityError::Truncated);
+    }
+    let offset = capability.offset as usize;
+    if offset + 4 > config.len() {
+        return Err(CapabilityError::Truncated);
+    }
+    let control = u16::from_le_bytes([config[offset + 2], config[offset + 3]]);
+    Ok(MsiCapability {
+        offset: capability.offset,
+        is_64_bit: control & (1 << 7) != 0,
+        per_vector_masking: control & (1 << 8) != 0,
+        multiple_message_capable: ((control >> 1) & 0x7) as u8,
+    })
+}
+
+pub fn decode_msix(
+    config: &[u8],
+    capability: PciCapability,
+) -> Result<MsixCapability, CapabilityError> {
+    if capability.id != 0x11 {
+        return Err(CapabilityError::Truncated);
+    }
+    let offset = capability.offset as usize;
+    if offset.checked_add(12).is_none_or(|end| end > config.len()) {
+        return Err(CapabilityError::Truncated);
+    }
+    let control = u16::from_le_bytes([config[offset + 2], config[offset + 3]]);
+    let table = u32::from_le_bytes([
+        config[offset + 4],
+        config[offset + 5],
+        config[offset + 6],
+        config[offset + 7],
+    ]);
+    let pba = u32::from_le_bytes([
+        config[offset + 8],
+        config[offset + 9],
+        config[offset + 10],
+        config[offset + 11],
+    ]);
+    Ok(MsixCapability {
+        offset: capability.offset,
+        table_size: (control & 0x07FF) + 1,
+        table_bir: (table & 0x7) as u8,
+        table_offset: table & !0x7,
+        pba_bir: (pba & 0x7) as u8,
+        pba_offset: pba & !0x7,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApicMsiMessage {
+    pub address: u32,
+    pub data: u16,
+}
+
+pub fn apic_msi_message(vector: u8, destination_apic_id: u8) -> Option<ApicMsiMessage> {
+    if !(0x40..=0x4F).contains(&vector) {
+        return None;
+    }
+    Some(ApicMsiMessage {
+        address: 0xFEE0_0000 | (u32::from(destination_apic_id) << 12),
+        data: u16::from(vector),
+    })
+}
+
+pub const PCI_VECTOR_FIRST: u8 = 0x40;
+pub const PCI_VECTOR_LAST: u8 = 0x4F;
+const PCI_VECTOR_COUNT: usize = (PCI_VECTOR_LAST - PCI_VECTOR_FIRST + 1) as usize;
+
+#[cfg(target_os = "none")]
+static PCI_PENDING_VECTORS: AtomicU16 = AtomicU16::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciInterruptMode {
+    Msix,
+    Msi,
+    Polling,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciVectorState {
+    Free,
+    Reserved,
+    Armed,
+    Masked,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciVectorOwner {
+    pub address: PciAddress,
+    pub mode: PciInterruptMode,
+    pub destination_apic_id: u8,
+    pub state: PciVectorState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciVectorError {
+    InvalidVector,
+    AlreadyOwned,
+    NotOwned,
+    InvalidTransition,
+}
+
+/// Fixed vector registry. It is deliberately independent from config-space
+/// writes so a failed programming transaction can release or mask ownership
+/// without leaving a second driver able to reuse the vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciVectorRegistry {
+    owners: [Option<PciVectorOwner>; PCI_VECTOR_COUNT],
+}
+
+impl PciVectorRegistry {
+    pub const fn new() -> Self {
+        Self {
+            owners: [None; PCI_VECTOR_COUNT],
+        }
+    }
+
+    fn index(vector: u8) -> Result<usize, PciVectorError> {
+        if !(PCI_VECTOR_FIRST..=PCI_VECTOR_LAST).contains(&vector) {
+            Err(PciVectorError::InvalidVector)
+        } else {
+            Ok((vector - PCI_VECTOR_FIRST) as usize)
+        }
+    }
+
+    pub fn owner(&self, vector: u8) -> Result<Option<PciVectorOwner>, PciVectorError> {
+        Ok(self.owners[Self::index(vector)?])
+    }
+
+    pub fn reserve(
+        &mut self,
+        vector: u8,
+        address: PciAddress,
+        mode: PciInterruptMode,
+        destination_apic_id: u8,
+    ) -> Result<(), PciVectorError> {
+        let index = Self::index(vector)?;
+        if self.owners[index].is_some() {
+            return Err(PciVectorError::AlreadyOwned);
+        }
+        self.owners[index] = Some(PciVectorOwner {
+            address,
+            mode,
+            destination_apic_id,
+            state: PciVectorState::Reserved,
+        });
+        Ok(())
+    }
+
+    pub fn transition(&mut self, vector: u8, state: PciVectorState) -> Result<(), PciVectorError> {
+        let index = Self::index(vector)?;
+        let owner = self.owners[index]
+            .as_mut()
+            .ok_or(PciVectorError::NotOwned)?;
+        let valid = matches!(
+            (owner.state, state),
+            (PciVectorState::Reserved, PciVectorState::Armed)
+                | (PciVectorState::Reserved, PciVectorState::Masked)
+                | (PciVectorState::Reserved, PciVectorState::Failed)
+                | (PciVectorState::Armed, PciVectorState::Masked)
+                | (PciVectorState::Masked, PciVectorState::Armed)
+                | (PciVectorState::Armed, PciVectorState::Failed)
+                | (PciVectorState::Masked, PciVectorState::Failed)
+        );
+        if !valid {
+            return Err(PciVectorError::InvalidTransition);
+        }
+        owner.state = state;
+        Ok(())
+    }
+
+    /// Release is only possible after a failed setup; an armed vector is never
+    /// silently recycled during the lifetime of the boot.
+    pub fn release_failed(&mut self, vector: u8) -> Result<(), PciVectorError> {
+        let index = Self::index(vector)?;
+        if self.owners[index].is_some_and(|owner| owner.state == PciVectorState::Failed) {
+            self.owners[index] = None;
+            Ok(())
+        } else {
+            Err(PciVectorError::InvalidTransition)
+        }
+    }
+}
+
+impl Default for PciVectorRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Constant-time interrupt top half. It only records the vector; the owning
+/// driver must consume the bit and inspect its device outside interrupt
+/// context.
+#[cfg(target_os = "none")]
+pub fn interrupt_top_half(vector: u8) {
+    if let Ok(index) = PciVectorRegistry::index(vector) {
+        PCI_PENDING_VECTORS.fetch_or(1u16 << index, Ordering::Release);
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn interrupt_top_half(_vector: u8) {}
+
+#[cfg(target_os = "none")]
+pub fn take_interrupt_pending(vector: u8) -> bool {
+    let Ok(index) = PciVectorRegistry::index(vector) else {
+        return false;
+    };
+    let mask = 1u16 << index;
+    PCI_PENDING_VECTORS.fetch_and(!mask, Ordering::Acquire) & mask != 0
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn take_interrupt_pending(_vector: u8) -> bool {
+    false
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiConfigState {
+    pub control: u16,
+    pub address_low: u32,
+    pub address_high: u32,
+    pub data: u16,
+    pub mask_bits: u32,
+    pub command: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsixTableEntry {
+    pub address_low: u32,
+    pub address_high: u32,
+    pub data: u32,
+    pub vector_control: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptProgrammingError {
+    InvalidCapability,
+    InvalidBar,
+    TableOutsideBar,
+    InvalidEntry,
+}
+
+/// Program one MSI message while preserving unrelated control bits. The
+/// capability remains disabled (and the message masked when supported) until
+/// all address/data writes have completed.
+pub fn program_msi(
+    state: &mut MsiConfigState,
+    capability: MsiCapability,
+    message: ApicMsiMessage,
+) -> Result<(), InterruptProgrammingError> {
+    if message.address & 0xFFF != 0 || message.data < 0x40 {
+        return Err(InterruptProgrammingError::InvalidCapability);
+    }
+    let original = *state;
+    let mut control = state.control;
+    control &= !(0x7 << 4); // force one message regardless of MMC
+    control &= !(0x7 << 1); // MME = zero
+    control &= !(1 << 0); // MSI disabled while publishing the message
+    state.control = control;
+    state.address_low = message.address;
+    if capability.is_64_bit {
+        state.address_high = 0;
+    }
+    state.data = message.data;
+    if capability.per_vector_masking {
+        state.mask_bits |= 1;
+    }
+    state.command |= COMMAND_MEMORY_SPACE;
+    // A reserved vector can be armed by the caller after the device source is
+    // configured; this function intentionally leaves MSI disabled.
+    if state.address_low != message.address || state.data != message.data {
+        *state = original;
+        return Err(InterruptProgrammingError::InvalidCapability);
+    }
+    state.control |= 1;
+    if capability.per_vector_masking {
+        state.mask_bits &= !1;
+    }
+    Ok(())
+}
+
+/// Publish MSI-X table entry zero (or another checked entry) inside a measured
+/// memory BAR. The entry is masked before writes and unmasked only at commit.
+pub fn program_msix_entry(
+    entry: &mut MsixTableEntry,
+    capability: MsixCapability,
+    bar_index: u8,
+    bar_size: u64,
+    entry_index: u16,
+    message: ApicMsiMessage,
+) -> Result<(), InterruptProgrammingError> {
+    if capability.table_bir != bar_index || bar_size == 0 || message.address & 0xFFF != 0 {
+        return Err(InterruptProgrammingError::InvalidBar);
+    }
+    if entry_index >= capability.table_size {
+        return Err(InterruptProgrammingError::InvalidEntry);
+    }
+    let offset = u64::from(capability.table_offset)
+        .checked_add(
+            u64::from(entry_index)
+                .checked_mul(16)
+                .ok_or(InterruptProgrammingError::TableOutsideBar)?,
+        )
+        .ok_or(InterruptProgrammingError::TableOutsideBar)?;
+    if offset.checked_add(16).is_none_or(|end| end > bar_size) {
+        return Err(InterruptProgrammingError::TableOutsideBar);
+    }
+    let original = *entry;
+    entry.vector_control |= 1;
+    entry.address_low = message.address;
+    entry.address_high = 0;
+    entry.data = u32::from(message.data);
+    if entry.address_low != message.address || entry.data != u32::from(message.data) {
+        *entry = original;
+        return Err(InterruptProgrammingError::InvalidEntry);
+    }
+    entry.vector_control &= !1;
+    Ok(())
 }
 
 impl PciDevice {
@@ -1484,5 +1924,155 @@ mod tests {
         assert_eq!(mapping.mapped_len, PAGE_SIZE);
         assert!(mapping.contains(0xFC, 4));
         assert!(!mapping.contains(0xFD, 4));
+    }
+
+    #[test]
+    fn walks_and_decodes_msi_msix_capabilities() {
+        let mut config = [0u8; 256];
+        config[0x06..0x08].copy_from_slice(&(1u16 << 4).to_le_bytes());
+        config[0x34] = 0x40;
+        config[0x40] = 0x05;
+        config[0x41] = 0x50;
+        config[0x42..0x44].copy_from_slice(&(0x180u16).to_le_bytes()); // 64-bit + masking
+        config[0x50] = 0x11;
+        config[0x51] = 0;
+        config[0x52..0x54].copy_from_slice(&(3u16).to_le_bytes());
+        config[0x54..0x58].copy_from_slice(&(0x2004u32).to_le_bytes());
+        config[0x58..0x5C].copy_from_slice(&(0x3002u32).to_le_bytes());
+        let caps = walk_capabilities(&config).unwrap();
+        assert_eq!(caps.len(), 2);
+        let msi = decode_msi(&config, caps.find(0x05).unwrap()).unwrap();
+        assert!(msi.is_64_bit && msi.per_vector_masking);
+        assert_eq!(msi.multiple_message_capable, 0);
+        let msix = decode_msix(&config, caps.find(0x11).unwrap()).unwrap();
+        assert_eq!(msix.table_size, 4);
+        assert_eq!((msix.table_bir, msix.table_offset), (4, 0x2000));
+        assert_eq!((msix.pba_bir, msix.pba_offset), (2, 0x3000));
+    }
+
+    #[test]
+    fn rejects_malformed_capability_chain_and_builds_apic_message() {
+        let mut config = [0u8; 256];
+        config[0x06] = 0x10;
+        config[0x34] = 0x42;
+        assert_eq!(
+            walk_capabilities(&config),
+            Err(CapabilityError::MisalignedPointer)
+        );
+        config[0x34] = 0x40;
+        config[0x40] = 1;
+        config[0x41] = 0x40;
+        assert_eq!(walk_capabilities(&config), Err(CapabilityError::Cycle));
+        let message = apic_msi_message(0x40, 7).unwrap();
+        assert_eq!(
+            message,
+            ApicMsiMessage {
+                address: 0xFEE0_7000,
+                data: 0x40
+            }
+        );
+        assert!(apic_msi_message(0x3F, 0).is_none());
+    }
+
+    #[test]
+    fn reserves_and_arms_pci_vector_without_duplicate_ownership() {
+        let mut registry = PciVectorRegistry::new();
+        let device = address(0, 5, 0);
+        registry
+            .reserve(PCI_VECTOR_FIRST, device, PciInterruptMode::Msix, 0)
+            .unwrap();
+        assert_eq!(
+            registry.reserve(PCI_VECTOR_FIRST, device, PciInterruptMode::Msi, 0),
+            Err(PciVectorError::AlreadyOwned)
+        );
+        assert_eq!(
+            registry.transition(PCI_VECTOR_FIRST, PciVectorState::Armed),
+            Ok(())
+        );
+        assert_eq!(
+            registry.transition(PCI_VECTOR_FIRST, PciVectorState::Reserved),
+            Err(PciVectorError::InvalidTransition)
+        );
+        assert_eq!(
+            registry.owner(PCI_VECTOR_FIRST).unwrap().unwrap().state,
+            PciVectorState::Armed
+        );
+    }
+
+    #[test]
+    fn failed_vector_can_be_released_but_armed_vector_cannot() {
+        let mut registry = PciVectorRegistry::new();
+        let device = address(0, 6, 0);
+        registry
+            .reserve(PCI_VECTOR_FIRST + 1, device, PciInterruptMode::Msi, 3)
+            .unwrap();
+        assert_eq!(
+            registry.release_failed(PCI_VECTOR_FIRST + 1),
+            Err(PciVectorError::InvalidTransition)
+        );
+        registry
+            .transition(PCI_VECTOR_FIRST + 1, PciVectorState::Failed)
+            .unwrap();
+        registry.release_failed(PCI_VECTOR_FIRST + 1).unwrap();
+        assert_eq!(registry.owner(PCI_VECTOR_FIRST + 1).unwrap(), None);
+        assert_eq!(registry.owner(0x30), Err(PciVectorError::InvalidVector));
+    }
+
+    #[test]
+    fn programs_msi_preserving_capability_bits_and_masking_until_commit() {
+        let mut state = MsiConfigState {
+            control: (1 << 7) | (3 << 4) | (1 << 8),
+            address_low: 0,
+            address_high: 0xDEAD_BEEF,
+            data: 0,
+            mask_bits: 0,
+            command: COMMAND_BUS_MASTER,
+        };
+        program_msi(
+            &mut state,
+            MsiCapability {
+                offset: 0x40,
+                is_64_bit: true,
+                per_vector_masking: true,
+                multiple_message_capable: 3,
+            },
+            apic_msi_message(PCI_VECTOR_FIRST, 0).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state.address_low, 0xFEE0_0000);
+        assert_eq!(state.address_high, 0);
+        assert_eq!(state.data, u16::from(PCI_VECTOR_FIRST));
+        assert_ne!(state.control & 1, 0);
+        assert_eq!(state.control & (0x7 << 1), 0);
+        assert_eq!(state.command & COMMAND_BUS_MASTER, COMMAND_BUS_MASTER);
+        assert_eq!(state.mask_bits & 1, 0);
+    }
+
+    #[test]
+    fn rejects_msix_table_outside_measured_bar_without_mutation() {
+        let original = MsixTableEntry {
+            address_low: 1,
+            address_high: 2,
+            data: 3,
+            vector_control: 4,
+        };
+        let mut entry = original;
+        let result = program_msix_entry(
+            &mut entry,
+            MsixCapability {
+                offset: 0x50,
+                table_size: 1,
+                table_bir: 0,
+                table_offset: 0x1000,
+                pba_bir: 0,
+                pba_offset: 0x2000,
+            },
+            0,
+            0x100,
+            0,
+            apic_msi_message(PCI_VECTOR_FIRST, 0).unwrap(),
+        );
+        assert_eq!(result, Err(InterruptProgrammingError::TableOutsideBar));
+        assert_eq!(entry, original);
     }
 }

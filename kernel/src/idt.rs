@@ -46,6 +46,22 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt[pic::InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
     idt[pic::InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
     idt[brane_os_kernel::smp::AP_INTERRUPT_PROBE_VECTOR].set_handler_fn(ap_interrupt_probe_handler);
+    idt[0x40].set_handler_fn(pci_vector_40_handler);
+    idt[0x41].set_handler_fn(pci_vector_41_handler);
+    idt[0x42].set_handler_fn(pci_vector_42_handler);
+    idt[0x43].set_handler_fn(pci_vector_43_handler);
+    idt[0x44].set_handler_fn(pci_vector_44_handler);
+    idt[0x45].set_handler_fn(pci_vector_45_handler);
+    idt[0x46].set_handler_fn(pci_vector_46_handler);
+    idt[0x47].set_handler_fn(pci_vector_47_handler);
+    idt[0x48].set_handler_fn(pci_vector_48_handler);
+    idt[0x49].set_handler_fn(pci_vector_49_handler);
+    idt[0x4A].set_handler_fn(pci_vector_4a_handler);
+    idt[0x4B].set_handler_fn(pci_vector_4b_handler);
+    idt[0x4C].set_handler_fn(pci_vector_4c_handler);
+    idt[0x4D].set_handler_fn(pci_vector_4d_handler);
+    idt[0x4E].set_handler_fn(pci_vector_4e_handler);
+    idt[0x4F].set_handler_fn(pci_vector_4f_handler);
     idt[brane_os_kernel::apic::LOCAL_APIC_SPURIOUS_VECTOR]
         .set_handler_fn(spurious_interrupt_handler);
 
@@ -159,6 +175,35 @@ extern "x86-interrupt" fn ap_interrupt_probe_handler(_stack_frame: InterruptStac
     brane_os_kernel::smp::acknowledge_interrupt_probe();
     let _ = brane_os_kernel::apic::end_of_interrupt();
 }
+
+/// PCI vector 0x40 wrapper. The top half only records pending work and sends
+/// EOI; xHCI (or a later PCI consumer) drains its device state in deferred
+/// context.
+macro_rules! pci_vector_handler {
+    ($name:ident, $vector:expr) => {
+        extern "x86-interrupt" fn $name(_stack_frame: InterruptStackFrame) {
+            brane_os_kernel::pci::interrupt_top_half($vector);
+            let _ = brane_os_kernel::apic::end_of_interrupt();
+        }
+    };
+}
+
+pci_vector_handler!(pci_vector_40_handler, 0x40);
+pci_vector_handler!(pci_vector_41_handler, 0x41);
+pci_vector_handler!(pci_vector_42_handler, 0x42);
+pci_vector_handler!(pci_vector_43_handler, 0x43);
+pci_vector_handler!(pci_vector_44_handler, 0x44);
+pci_vector_handler!(pci_vector_45_handler, 0x45);
+pci_vector_handler!(pci_vector_46_handler, 0x46);
+pci_vector_handler!(pci_vector_47_handler, 0x47);
+pci_vector_handler!(pci_vector_48_handler, 0x48);
+pci_vector_handler!(pci_vector_49_handler, 0x49);
+pci_vector_handler!(pci_vector_4a_handler, 0x4A);
+pci_vector_handler!(pci_vector_4b_handler, 0x4B);
+pci_vector_handler!(pci_vector_4c_handler, 0x4C);
+pci_vector_handler!(pci_vector_4d_handler, 0x4D);
+pci_vector_handler!(pci_vector_4e_handler, 0x4E);
+pci_vector_handler!(pci_vector_4f_handler, 0x4F);
 
 fn acknowledge_interrupt(vector: u8) {
     if brane_os_kernel::apic::end_of_interrupt() {

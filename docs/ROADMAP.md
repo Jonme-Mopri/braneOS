@@ -18,7 +18,7 @@
  ─────────────────────────────────────────────────────┼─────────────────────────────────────────────────▶
 ```
 
-**Foco actual:** Fase 13 — entregar los eventos xHCI mediante MSI-X, con
+**Foco actual:** Fase 13 — completar la entrega de eventos xHCI mediante MSI-X, con
 fallback MSI y polling, conservando el dispatcher único ya validado por USB HID
 y Mass Storage. La secuencia, rollback y pruebas están definidos en
 [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
@@ -279,7 +279,7 @@ físico se mantiene en la matriz de release de la Fase 11.
 | Componente | Estado | Prioridad | Dependencia |
 |-----------|--------|-----------|-------------|
 | Enumeración PCI/PCIe robusta | ✅ | ALTA | ECAM/MCFG con fallback CF8/CFC, bridges, multifunction, BAR 32/64 y apertures MMIO medidas/mapeadas |
-| MSI/MSI-X | 🔲 | MEDIA | Diseño, ownership y fallback definidos en `PCI_INTERRUPTS.md` y ADR-007 |
+| MSI/MSI-X | 🟡 | MEDIA | Walker, decoders, ownership, modelos transaccionales y wrappers IDT; falta conexión real y fallback |
 | Controlador xHCI | 🔄 | ALTA | Control, interrupt y bulk listos; faltan MSI/MSI-X, múltiples slots y hotplug |
 | USB HID | ✅ | ALTA | Teclado boot protocol → TTY en Q35 con 1/4 vCPU; ratón fuera de la baseline |
 | USB mass storage | ✅ | MEDIA | BOT/SCSI LUN 0 read-only → `usb-storage0` → FAT32 `/usb`, Q35 1/4 vCPU |
@@ -379,6 +379,15 @@ Event Ring. El primer vector será xHCI en el BSP; afinidad, x2APIC y múltiples
 vectores quedan fuera de la baseline. El plan, rollback y pruebas se definen en
 [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md) y
 [`ADR-007`](ADR/ADR-007-pci-interrupt-delivery.md).
+
+**Primer incremento completado:** `pci.rs` recorre la lista convencional de
+capabilities con límites fijos y rechazo fail-closed de punteros inválidos,
+ciclos y truncamientos. Decodifica MSI (32/64 bits y masking) y MSI-X (tamaño,
+BIR y offsets de tabla/PBA), y construye el mensaje físico xAPIC para el rango
+reservado `0x40..=0x4F`. Doce pruebas PCI cubren el walker, decoders, ciclos,
+límites vectoriales y ownership sin duplicados. El siguiente incremento
+implementará la conexión de los writes transaccionales al config space/MMIO y
+el consumo diferido desde xHCI, conservando fallback MSI/polling.
 
 ---
 
