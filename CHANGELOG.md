@@ -7,6 +7,11 @@ All notable changes to Brane OS are documented here. The project follows
 
 ### Added
 
+- xHCI ACPI S3 gate with fail-closed quiesce, ring/register retention
+  validation, polling fallback and quarantine when firmware resets state;
+  `make acpi-xhci-test` provides an opt-in Q35 smoke path.
+- Two deterministic PCI vector-registry tests covering invalid ownership
+  transitions and metadata preservation across mask/rearm.
 - Documentation portal, reconciled current-vs-target status, and ADRs for Brane
   Protocol v2, the syscall ABI, IPC message passing and virtual memory.
 - Phase 13 implementation specification for xHCI control transfers, USB

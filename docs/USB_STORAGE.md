@@ -351,7 +351,7 @@ El corte se considera terminado cuando:
 
 La baseline de software satisface este criterio el 2026-09-15:
 
-- `cargo test -p brane_os_kernel --lib`: **187 tests**; incluye parsers,
+- `cargo test -p brane_os_kernel --lib`: **189 tests**; incluye parsers,
   framing/endian, CDB, geometría, read-only y un transporte BOT simulado.
 - Las pruebas negativas verifican phase error e identidad CSW inválida seguidos
   por Reset Recovery en orden, y timeout con recuperación fallida seguido por

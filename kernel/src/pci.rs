@@ -2306,6 +2306,52 @@ mod tests {
     }
 
     #[test]
+    fn vector_registry_rejects_out_of_range_and_unowned_transitions() {
+        let mut registry = PciVectorRegistry::new();
+        let device = address(0, 7, 0);
+
+        assert_eq!(
+            registry.reserve(PCI_VECTOR_FIRST - 1, device, PciInterruptMode::Msi, 0),
+            Err(PciVectorError::InvalidVector)
+        );
+        assert_eq!(
+            registry.reserve(PCI_VECTOR_LAST + 1, device, PciInterruptMode::Msix, 0),
+            Err(PciVectorError::InvalidVector)
+        );
+        assert_eq!(
+            registry.transition(PCI_VECTOR_FIRST, PciVectorState::Armed),
+            Err(PciVectorError::NotOwned)
+        );
+        assert_eq!(registry.owner(PCI_VECTOR_FIRST), Ok(None));
+    }
+
+    #[test]
+    fn vector_registry_preserves_owner_metadata_across_mask_rearm() {
+        let mut registry = PciVectorRegistry::new();
+        let device = address(2, 3, 1);
+        registry
+            .reserve(PCI_VECTOR_LAST, device, PciInterruptMode::Msix, 9)
+            .unwrap();
+
+        registry
+            .transition(PCI_VECTOR_LAST, PciVectorState::Masked)
+            .unwrap();
+        registry
+            .transition(PCI_VECTOR_LAST, PciVectorState::Armed)
+            .unwrap();
+
+        assert_eq!(
+            registry.owner(PCI_VECTOR_LAST).unwrap(),
+            Some(PciVectorOwner {
+                address: device,
+                mode: PciInterruptMode::Msix,
+                destination_apic_id: 9,
+                state: PciVectorState::Armed,
+            })
+        );
+    }
+
+    #[test]
     fn programs_msi_preserving_capability_bits_and_masking_until_commit() {
         let mut state = MsiConfigState {
             control: (1 << 7) | (5 << 1) | (3 << 4) | (1 << 8),

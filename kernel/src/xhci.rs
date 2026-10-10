@@ -213,6 +213,52 @@ pub enum XhciInitError {
     ControllerError,
 }
 
+/// State exposed to the ACPI S3 coordinator.
+///
+/// `Quiesced` means that the controller was stopped only after all software
+/// owned command/transfer slots were empty. `PollingFallback` is a valid
+/// resume result when the DMA/ring register set is still valid but the MSI
+/// route is deliberately not reused. `Quarantined` means that the retained
+/// state could not be validated; callers must leave the controller stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XhciS3State {
+    Absent,
+    Active,
+    Quiesced,
+    PollingFallback,
+    Quarantined,
+}
+
+/// Result of validating and restoring xHCI after ACPI S3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XhciS3Resume {
+    /// Ring and register retention was validated and the original polling
+    /// path can continue to consume the Event Ring.
+    Retained,
+    /// Ring/register retention was validated, but the pre-S3 MSI/MSI-X path
+    /// is intentionally not reused. The caller must continue through polling.
+    PollingFallback,
+    /// Retention could not be validated. DMA remains stopped and the device
+    /// is quarantined; no generic re-enumeration is implied.
+    Quarantined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XhciS3Error {
+    Busy,
+    ControllerNotRunning,
+    AlreadyQuiesced,
+    Register(XhciInitError),
+    SnapshotMismatch,
+    Quarantined,
+}
+
+/// Opaque token pairing one successful quiesce with one resume attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XhciS3Token {
+    generation: u64,
+}
+
 impl From<DmaError> for XhciInitError {
     fn from(error: DmaError) -> Self {
         Self::Dma(error)
@@ -1114,6 +1160,19 @@ struct EventRingSegmentTableEntry {
     reserved: u32,
 }
 
+#[cfg(target_os = "none")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct XhciS3Snapshot {
+    usbcmd: u32,
+    crcr: u64,
+    dcbaap: u64,
+    config: u32,
+    erstba: u64,
+    erdp: u64,
+    iman: u32,
+    interrupt_mode: pci::PciInterruptMode,
+}
+
 struct XhciController {
     info: XhciControllerInfo,
     layout: RegisterLayout,
@@ -1130,10 +1189,15 @@ struct XhciController {
     event_cycle: bool,
     events: EventDispatchState,
     first_device: Option<XhciDevice>,
+    s3_state: XhciS3State,
+    s3_generation: u64,
+    #[cfg(target_os = "none")]
+    s3_snapshot: Option<XhciS3Snapshot>,
 }
 
 static XHCI_CONTROLLER: Once<Mutex<XhciController>> = Once::new();
 static HID_DECODER: Mutex<HidKeyboardDecoder> = Mutex::new(HidKeyboardDecoder::new());
+static PENDING_S3_TOKEN: Mutex<Option<XhciS3Token>> = Mutex::new(None);
 
 pub fn find_controller() -> Option<PciDevice> {
     pci::find_device(|device| {
@@ -1272,6 +1336,13 @@ fn mmio_address(mapping: MmioMapping, offset: u64, width: u64) -> Result<u64, Xh
 fn read_mmio_u32(mapping: MmioMapping, offset: u64) -> Result<u32, XhciInitError> {
     let address = mmio_address(mapping, offset, core::mem::size_of::<u32>() as u64)?;
     Ok(unsafe { core::ptr::read_volatile(address as *const u32) })
+}
+
+#[cfg(target_os = "none")]
+fn read_mmio_u64(mapping: MmioMapping, offset: u64) -> Result<u64, XhciInitError> {
+    let low = read_mmio_u32(mapping, offset)? as u64;
+    let high = read_mmio_u32(mapping, offset + 4)? as u64;
+    Ok(low | (high << 32))
 }
 
 #[cfg(target_os = "none")]
@@ -1791,6 +1862,266 @@ fn allocate_device(
 
 #[cfg(target_os = "none")]
 impl XhciController {
+    fn quarantine_s3(&mut self) {
+        // Best effort only: if the BAR itself is no longer readable, the
+        // state marker is still authoritative and prevents a resume attempt.
+        let _ = read_mmio_u32(self.info.mmio, self.layout.runtime(IMAN)).and_then(|iman| {
+            write_mmio_u32(
+                self.info.mmio,
+                self.layout.runtime(IMAN),
+                (iman & !0b10) | 1,
+            )
+        });
+        let _ =
+            read_mmio_u32(self.info.mmio, self.layout.operational(USBCMD)).and_then(|command| {
+                write_mmio_u32(
+                    self.info.mmio,
+                    self.layout.operational(USBCMD),
+                    command & !(USBCMD_RUN_STOP | USBCMD_INTE),
+                )
+            });
+        self.info.running = false;
+        self.s3_state = XhciS3State::Quarantined;
+        self.s3_snapshot = None;
+    }
+
+    fn snapshot_matches_rings(&self, snapshot: XhciS3Snapshot) -> bool {
+        let Ok(expected_erdp) = self
+            .event_ring
+            .physical_at(self.event_dequeue_index * core::mem::size_of::<Trb>())
+            .ok_or(XhciInitError::InvalidCapabilities)
+        else {
+            return false;
+        };
+        snapshot.crcr & !0x3F == self.command_ring.physical_start()
+            && snapshot.dcbaap & !0x3F == self.dcbaa.physical_start()
+            && snapshot.erstba & !0x3F == self.event_ring_segment_table.physical_start()
+            && snapshot.erdp & !0x0F == expected_erdp
+            && snapshot.config & 0xFF == u32::from(self.info.enabled_slots)
+    }
+
+    fn read_s3_snapshot(&self) -> Result<XhciS3Snapshot, XhciS3Error> {
+        let snapshot = XhciS3Snapshot {
+            usbcmd: read_mmio_u32(self.info.mmio, self.layout.operational(USBCMD))
+                .map_err(XhciS3Error::Register)?,
+            crcr: read_mmio_u64(self.info.mmio, self.layout.operational(CRCR))
+                .map_err(XhciS3Error::Register)?,
+            dcbaap: read_mmio_u64(self.info.mmio, self.layout.operational(DCBAAP))
+                .map_err(XhciS3Error::Register)?,
+            config: read_mmio_u32(self.info.mmio, self.layout.operational(CONFIG))
+                .map_err(XhciS3Error::Register)?,
+            erstba: read_mmio_u64(self.info.mmio, self.layout.runtime(ERSTBA))
+                .map_err(XhciS3Error::Register)?,
+            erdp: read_mmio_u64(self.info.mmio, self.layout.runtime(ERDP))
+                .map_err(XhciS3Error::Register)?,
+            iman: read_mmio_u32(self.info.mmio, self.layout.runtime(IMAN))
+                .map_err(XhciS3Error::Register)?,
+            interrupt_mode: self.info.interrupt_mode,
+        };
+        if snapshot.usbcmd & USBCMD_RUN_STOP == 0
+            || !self.info.running
+            || !self.snapshot_matches_rings(snapshot)
+        {
+            return Err(XhciS3Error::ControllerNotRunning);
+        }
+        Ok(snapshot)
+    }
+
+    fn quiesce_for_s3(&mut self) -> Result<XhciS3Token, XhciS3Error> {
+        if self.s3_state == XhciS3State::Quarantined {
+            return Err(XhciS3Error::Quarantined);
+        }
+        if self.s3_state == XhciS3State::Quiesced {
+            return Err(XhciS3Error::AlreadyQuiesced);
+        }
+        // Do not stop the controller while software owns a command or a
+        // transfer. In particular, the continuously armed HID transfer is a
+        // hard gate: cancelling it would require endpoint/ring recovery that
+        // this cut deliberately does not claim to implement.
+        if self.events.command.is_some()
+            || self.events.transfer.is_some()
+            || self
+                .first_device
+                .as_ref()
+                .is_some_and(|device| device.hid_transfer_pending)
+        {
+            return Err(XhciS3Error::Busy);
+        }
+
+        let snapshot = self.read_s3_snapshot()?;
+        let result = (|| {
+            // Mask the xHCI interrupter before stopping the producer. The IP
+            // bit is W1C; writing one also clears a stale summary.
+            write_mmio_u32(
+                self.info.mmio,
+                self.layout.runtime(IMAN),
+                (snapshot.iman & !0b10) | 1,
+            )
+            .map_err(XhciS3Error::Register)?;
+            write_mmio_u32(
+                self.info.mmio,
+                self.layout.operational(USBCMD),
+                snapshot.usbcmd & !(USBCMD_RUN_STOP | USBCMD_INTE),
+            )
+            .map_err(XhciS3Error::Register)?;
+            wait_for_bits(
+                self.info.mmio,
+                self.layout.operational(USBSTS),
+                USBSTS_HOST_CONTROLLER_HALTED,
+                USBSTS_HOST_CONTROLLER_HALTED,
+                XhciInitError::ControllerHaltTimeout,
+            )
+            .map_err(XhciS3Error::Register)?;
+            if read_mmio_u32(self.info.mmio, self.layout.operational(USBSTS))
+                .map_err(XhciS3Error::Register)?
+                & USBSTS_EVENT_INTERRUPT
+                != 0
+            {
+                write_mmio_u32(
+                    self.info.mmio,
+                    self.layout.operational(USBSTS),
+                    USBSTS_EVENT_INTERRUPT,
+                )
+                .map_err(XhciS3Error::Register)?;
+            }
+            Ok::<(), XhciS3Error>(())
+        })();
+        if let Err(error) = result {
+            self.quarantine_s3();
+            return Err(error);
+        }
+
+        self.info.running = false;
+        self.s3_generation = self.s3_generation.wrapping_add(1);
+        self.s3_snapshot = Some(snapshot);
+        self.s3_state = XhciS3State::Quiesced;
+        let _ = pci::take_interrupt_pending(pci::PCI_VECTOR_FIRST);
+        Ok(XhciS3Token {
+            generation: self.s3_generation,
+        })
+    }
+
+    fn resume_from_s3(&mut self, token: XhciS3Token) -> XhciS3Resume {
+        let Some(snapshot) = self.s3_snapshot else {
+            self.quarantine_s3();
+            return XhciS3Resume::Quarantined;
+        };
+        if self.s3_state != XhciS3State::Quiesced || token.generation != self.s3_generation {
+            self.quarantine_s3();
+            return XhciS3Resume::Quarantined;
+        }
+
+        let Ok(status) = read_mmio_u32(self.info.mmio, self.layout.operational(USBSTS)) else {
+            self.quarantine_s3();
+            return XhciS3Resume::Quarantined;
+        };
+        if status & (USBSTS_HOST_CONTROLLER_ERROR | USBSTS_CONTROLLER_NOT_READY) != 0 {
+            self.quarantine_s3();
+            return XhciS3Resume::Quarantined;
+        }
+
+        let (crcr, dcbaap, config, erstba, erdp) = (
+            read_mmio_u64(self.info.mmio, self.layout.operational(CRCR)),
+            read_mmio_u64(self.info.mmio, self.layout.operational(DCBAAP)),
+            read_mmio_u32(self.info.mmio, self.layout.operational(CONFIG)),
+            read_mmio_u64(self.info.mmio, self.layout.runtime(ERSTBA)),
+            read_mmio_u64(self.info.mmio, self.layout.runtime(ERDP)),
+        );
+        let (Ok(crcr), Ok(dcbaap), Ok(config), Ok(erstba), Ok(erdp)) =
+            (crcr, dcbaap, config, erstba, erdp)
+        else {
+            self.quarantine_s3();
+            return XhciS3Resume::Quarantined;
+        };
+        if crcr & !0x3F != snapshot.crcr & !0x3F
+            || dcbaap & !0x3F != snapshot.dcbaap & !0x3F
+            || config & 0xFF != snapshot.config & 0xFF
+            || erstba & !0x3F != snapshot.erstba & !0x3F
+            || erdp & !0x0F != snapshot.erdp & !0x0F
+            || !self.snapshot_matches_rings(snapshot)
+        {
+            self.quarantine_s3();
+            return XhciS3Resume::Quarantined;
+        }
+
+        // PCI MSI/MSI-X state is not reprogrammed in this cut. A validated
+        // DMA/ring set therefore resumes through polling, which keeps stale
+        // APIC delivery from touching a controller whose PCI capability may
+        // have been reset by firmware.
+        let result = (|| {
+            write_mmio_u64(self.info.mmio, self.layout.operational(CRCR), snapshot.crcr)
+                .map_err(XhciS3Error::Register)?;
+            write_mmio_u64(
+                self.info.mmio,
+                self.layout.operational(DCBAAP),
+                snapshot.dcbaap,
+            )
+            .map_err(XhciS3Error::Register)?;
+            write_mmio_u32(
+                self.info.mmio,
+                self.layout.operational(CONFIG),
+                snapshot.config,
+            )
+            .map_err(XhciS3Error::Register)?;
+            write_mmio_u64(self.info.mmio, self.layout.runtime(ERSTBA), snapshot.erstba)
+                .map_err(XhciS3Error::Register)?;
+            write_mmio_u64(self.info.mmio, self.layout.runtime(ERDP), snapshot.erdp)
+                .map_err(XhciS3Error::Register)?;
+            let status = read_mmio_u32(self.info.mmio, self.layout.operational(USBSTS))
+                .map_err(XhciS3Error::Register)?;
+            if status & USBSTS_EVENT_INTERRUPT != 0 {
+                write_mmio_u32(
+                    self.info.mmio,
+                    self.layout.operational(USBSTS),
+                    USBSTS_EVENT_INTERRUPT,
+                )
+                .map_err(XhciS3Error::Register)?;
+            }
+            write_mmio_u32(
+                self.info.mmio,
+                self.layout.runtime(IMAN),
+                1, // clear IP and keep IE masked during polling resume
+            )
+            .map_err(XhciS3Error::Register)?;
+            let command = snapshot.usbcmd & !(USBCMD_RUN_STOP | USBCMD_INTE);
+            write_mmio_u32(
+                self.info.mmio,
+                self.layout.operational(USBCMD),
+                command | USBCMD_RUN_STOP,
+            )
+            .map_err(XhciS3Error::Register)?;
+            wait_for_bits(
+                self.info.mmio,
+                self.layout.operational(USBSTS),
+                USBSTS_HOST_CONTROLLER_HALTED,
+                0,
+                XhciInitError::ControllerStartTimeout,
+            )
+            .map_err(XhciS3Error::Register)?;
+            Ok::<(), XhciS3Error>(())
+        })();
+        if result.is_err() {
+            self.quarantine_s3();
+            return XhciS3Resume::Quarantined;
+        }
+
+        self.info.running = true;
+        self.s3_snapshot = None;
+        self.s3_state = if snapshot.interrupt_mode == pci::PciInterruptMode::Polling {
+            XhciS3State::Active
+        } else {
+            self.info.interrupt_mode = pci::PciInterruptMode::Polling;
+            self.info.interrupt_vector = 0;
+            XhciS3State::PollingFallback
+        };
+        let _ = pci::take_interrupt_pending(pci::PCI_VECTOR_FIRST);
+        if snapshot.interrupt_mode == pci::PciInterruptMode::Polling {
+            XhciS3Resume::Retained
+        } else {
+            XhciS3Resume::PollingFallback
+        }
+    }
+
     /// Acknowledge the two xHCI W1C interrupt summaries after the Event Ring
     /// consumer has advanced ERDP. The IDT top half only raises the pending
     /// bit; MMIO is deliberately kept out of interrupt context.
@@ -2838,6 +3169,73 @@ pub fn service_interrupt_once() {
     }
 }
 
+/// Quiesce xHCI for an ACPI S3 transition.
+///
+/// `Ok(None)` means no xHCI controller was initialized. A present controller
+/// is stopped only when no command or transfer is owned by the software
+/// dispatcher; an armed HID transfer therefore rejects S3 with `Busy`.
+#[cfg(target_os = "none")]
+pub fn prepare_for_s3() -> Result<Option<XhciS3Token>, XhciS3Error> {
+    let Some(controller) = XHCI_CONTROLLER.get() else {
+        return Ok(None);
+    };
+    let token = controller.lock().quiesce_for_s3()?;
+    *PENDING_S3_TOKEN.lock() = Some(token);
+    Ok(Some(token))
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn prepare_for_s3() -> Result<Option<XhciS3Token>, XhciS3Error> {
+    Ok(None)
+}
+
+/// Validate the retained ring/register set and resume xHCI after S3. If the
+/// pre-sleep interrupt route was MSI/MSI-X, a valid retained DMA set resumes
+/// through polling because this cut does not reprogram PCI capabilities.
+#[cfg(target_os = "none")]
+pub fn resume_from_s3(token: XhciS3Token) -> XhciS3Resume {
+    {
+        let mut pending = PENDING_S3_TOKEN.lock();
+        if pending.is_some_and(|candidate| candidate.generation == token.generation) {
+            *pending = None;
+        }
+    }
+    let Some(controller) = XHCI_CONTROLLER.get() else {
+        return XhciS3Resume::Quarantined;
+    };
+    controller.lock().resume_from_s3(token)
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn resume_from_s3(_token: XhciS3Token) -> XhciS3Resume {
+    XhciS3Resume::Retained
+}
+
+/// Consume the token saved by `prepare_for_s3` after the ACPI trampoline has
+/// returned. The shell owns the suspend command; the kernel main loop calls
+/// this once it has restored APIC/PIC state.
+#[cfg(target_os = "none")]
+pub fn resume_pending_s3() -> Option<XhciS3Resume> {
+    let token = PENDING_S3_TOKEN.lock().take()?;
+    let Some(controller) = XHCI_CONTROLLER.get() else {
+        return Some(XhciS3Resume::Quarantined);
+    };
+    Some(controller.lock().resume_from_s3(token))
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn resume_pending_s3() -> Option<XhciS3Resume> {
+    None
+}
+
+/// Read the explicit S3 state marker used by the ACPI coordinator and shell.
+pub fn s3_state() -> XhciS3State {
+    XHCI_CONTROLLER
+        .get()
+        .map(|controller| controller.lock().s3_state)
+        .unwrap_or(XhciS3State::Absent)
+}
+
 /// Return the configured Bulk-Only transport endpoints for the first device.
 pub fn mass_storage_transport_info() -> Option<MassStorageTransportInfo> {
     let controller = XHCI_CONTROLLER.get()?;
@@ -3047,6 +3445,9 @@ pub fn init(
         event_cycle: true,
         events: EventDispatchState::new(),
         first_device: None,
+        s3_state: XhciS3State::Active,
+        s3_generation: 0,
+        s3_snapshot: None,
     };
     controller.submit_command(Trb::no_op_command())?;
     controller.info.command_probe_completed = true;

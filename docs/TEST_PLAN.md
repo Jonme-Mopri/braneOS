@@ -183,7 +183,7 @@ GitHub Actions valida en cada `push` y `pull_request` hacia `main`:
 | Formatting | Activo | `cargo fmt --all -- --check` |
 | Clippy | Activo | Kernel bare-metal + runner host con `-D warnings` |
 | Kernel unit tests | Activo | `cargo test -p brane_os_kernel --lib` |
-| **Storage/USB host** | **Activo** | xHCI USB/HID/Bulk, BOT/SCSI y recovery negativo, MCFG/ECAM, PCI, block, DMA, virtqueue y FAT32 (187 tests totales) |
+| **Storage/USB host** | **Activo** | xHCI USB/HID/Bulk, BOT/SCSI y recovery negativo, MCFG/ECAM, PCI, block, DMA, virtqueue y FAT32 (189 tests totales) |
 | **Stress y mutation-fuzz** | **Activo** | `make stress-test` (parsers, allocator, IPC y dispatcher SMP concurrente) |
 | **Release artifact (ISO UEFI)** | **Activo** | `make iso-test VERSION=ci` (ISO, checksum y boot con OVMF) |
 | **Boot test (QEMU)** | **Activo** | Kernel release + FAT32 virtio legacy read-only; exige LBA0, montaje `/disk` y lectura VFS real |
@@ -196,6 +196,7 @@ GitHub Actions valida en cada `push` y `pull_request` hacia `main`:
 | **SMP per-CPU timer state (host)** | **Activo** | `cargo test -p brane_os_kernel --lib cpu_local_scheduler_tracks_timer_without_touching_bsp` (slot, ticks y aislamiento del cursor BSP) |
 | **SMP dispatcher stress (host)** | **Activo** | `cargo test -p brane_os_kernel --lib stress_multicore_dispatch_preserves_task_ownership` (4 workers, 2.000 rondas, ownership y stealing) |
 | **ACPI S3 test (QEMU/QMP)** | **Activo** | `make acpi-test` (suspend, wake, shell y restauración del contexto BSP tras `yield`) |
+| **ACPI S3 xHCI smoke (Q35/QMP)** | **Opt-in** | `make acpi-xhci-test` arranca un `qemu-xhci` sin USB, ejecuta S3 y acepta `PollingFallback` o `Quarantined` según la retención de registros; no sustituye la prueba HID física |
 | **ACPI MADT/APIC/SMP** | **Activo** | `cargo test -p brane_os_kernel --lib madt` y `cargo test -p brane_os_kernel --lib smp` + boot BIOS (xAPIC/x2APIC, overrides, MMIO, IRQ routing, BSP y fallback PIC) |
 | **Security tests (QEMU)** | **Activo** | `make security-test` (capability denial + privilege escalation) |
 | **Integration tests (QEMU)** | **Activo** | `make integration-test` (syscall/service + capability broker) |
@@ -244,21 +245,26 @@ La validación local equivalente recomendada está documentada en
 19. ~~Fase 13: capability walker PCI, MSI-X/MSI y dispatcher xHCI diferido.~~ ✅
     **Completado parcialmente** (`make pci-interrupt-test` pasa con 1/4 vCPU y
     una ejecución `msix=off,msi=on`; Q35 arma vector `0x40`, reconoce `IMAN.IP`
-    y `USBSTS.EINT`, y valida dos completions HID por IRQ). S3 y hardware físico
-    permanecen abiertos según [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
-20. Fase 14: metadata exhaustiva de syscalls, user-copy, mediación por
+    y `USBSTS.EINT`, y valida dos completions HID por IRQ). El gate S3 y la
+    validación física siguen en el incremento siguiente.
+20. ~~Fase 13: gate xHCI alrededor de ACPI S3.~~ ✅ **Completado parcialmente**
+    (`prepare_for_s3` enmascara y detiene xHCI con un gate fail-closed;
+    `resume_pending_s3` valida rings y degrada a polling o quarantine). El
+    smoke Q35 es opt-in; la retención de endpoints HID y el rearmado PCI físico
+    siguen pendientes.
+21. Fase 14: metadata exhaustiva de syscalls, user-copy, mediación por
     capability, auditoría terminal y retorno ring 3 seguro; especificación en
     [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md).
-21. Fase 14: endpoints IPC generacionales, sender autenticado, Send/Recv reales
+22. Fase 14: endpoints IPC generacionales, sender autenticado, Send/Recv reales
     y wait cells sin lost wakeup en SMP; especificación en
     [`IPC_RUNTIME.md`](IPC_RUNTIME.md).
-22. Fase 14: cuatro servicios de seguridad ring 3, bootstrap sin ciclos, commit
+23. Fase 14: cuatro servicios de seguridad ring 3, bootstrap sin ciclos, commit
     exclusivo del broker, auditoría con gaps y reinicio fail-closed;
     especificación en [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md).
-23. Fase 14: orchestrator/model IA en procesos separados, telemetría tipada,
+24. Fase 14: orchestrator/model IA en procesos separados, telemetría tipada,
     budgets, provenance y primera acción con lease single-use; especificación en
     [`AI_RUNTIME.md`](AI_RUNTIME.md).
-24. Fase 14: parser `.bpkg`, cadena de metadata, resolver, store inmutable y
+25. Fase 14: parser `.bpkg`, cadena de metadata, resolver, store inmutable y
     crash recovery de generations; especificación en
     [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md).
 
@@ -277,6 +283,7 @@ La validación local equivalente recomendada está documentada en
 | `make usb-hid-test` | Q35/QMP con 1/4 vCPU; valida descriptor, endpoint interrupt IN y TTY |
 | `make smp-test` | Boot con 4 vCPU, hand-off real y ejecución verificada en cada AP |
 | `make acpi-test` | S3, shell post-resume y `yield` aislado del BSP en QEMU/QMP (120 s) |
+| `make acpi-xhci-test` | Smoke opt-in Q35 con xHCI sin dispositivo USB; gate S3 y resultado de retención/quarantine |
 | `make security-test` | Security tests en QEMU |
 | `make integration-test` | Integration tests en QEMU |
 | `make e2e-test` | E2E tests en QEMU |

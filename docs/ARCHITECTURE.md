@@ -776,7 +776,8 @@ consumir el Event Ring dentro del handler.
 Config space y tablas MSI-X se programan enmascarados y con rollback antes de
 publicar una ruta como armada. BIR y offsets se validan contra BARs medidos;
 los top halves no tomarán locks de PCI config, block, VFS, TTY o USB. El diseño,
-la secuencia S3 y los criterios Q35 se mantienen en
+la secuencia S3 —incluido el gate fail-closed que valida rings y degrada a
+polling/quarantine— y los criterios Q35 se mantienen en
 [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md); el ownership queda registrado en
 [`ADR-007`](ADR/ADR-007-pci-interrupt-delivery.md).
 
@@ -830,6 +831,13 @@ MSI después de publicar el Event Ring, habilita `IMAN/USBCMD.INTE` y conserva
 polling como fallback. El top half sólo marca el vector pendiente;
 `service_interrupt_once` consume eventos fuera del frame y un watchdog acotado
 recupera una notificación que no llegue.
+
+Antes de ACPI S3, `prepare_for_s3` rechaza una transferencia HID o command
+completion activa, enmascara IMAN/USBCMD y espera `Halted`. Después de restaurar
+LAPIC/PIC, `resume_pending_s3` compara CRCR, DCBAAP, CONFIG, ERSTBA y ERDP con
+las regiones DMA originales. Un mismatch detiene DMA y deja el controlador en
+quarantine; si los rings sobreviven pero la ruta MSI/MSI-X no se puede rearmar,
+el estado pasa explícitamente a polling.
 
 Una sonda `No Op Command` comprueba en Q35 que el controlador consume el TRB
 publicado mediante su doorbell, produce un `Command Completion Event` exitoso

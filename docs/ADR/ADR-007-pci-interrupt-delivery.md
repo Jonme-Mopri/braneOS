@@ -1,6 +1,6 @@
 # ADR-007: Entrega de interrupciones PCI y trabajo diferido
 
-**Estado:** Implementación parcial aceptada para Q35; acknowledgement diferido y polling validados; S3 y hardware físico pendientes
+**Estado:** Implementación parcial aceptada para Q35; acknowledgement diferido y gate S3 fail-closed validados; rearmado PCI y hardware físico pendientes
 **Fecha:** 2026-10-10
 **Autores:** Brane OS Team
 
@@ -16,8 +16,9 @@ asíncrona.
 El acknowledgement de `IMAN.IP` y `USBSTS.EINT` ocurre en el dispatcher
 diferido, después de avanzar `ERDP`; el wrapper de la IDT sólo publica el
 pending bit y emite EOI. El loop de shell usa una comprobación con IF=0 antes
-de `sti; hlt` para no perder un evento entre el sondeo y el reposo. La
-restauración S3 del xHCI sigue fuera de esta implementación parcial.
+de `sti; hlt` para no perder un evento entre el sondeo y el reposo. El gate S3
+enmascara y detiene xHCI, valida sus rings al volver y publica polling o
+quarantine; no reprograma todavía la capability PCI.
 
 La Fase 13 incluye MSI/MSI-X. Activarlas afecta config space, BARs MMIO, reserva
 de vectores, afinidad, orden de inicialización, suspend/resume y locks de los
@@ -141,7 +142,8 @@ migración, destino fuera de ocho bits y sincronización con hotplug de CPU.
 2. ~~Implementar MSI-X, MSI, readback y rollback con config/MMIO simulado.~~
 3. ~~Conectar xHCI a `0x40` con top half, watchdog y trabajo diferido.~~
 4. ~~Validar Q35 con MSI-X y con `msix=off,msi=on`, en 1/4 vCPU.~~
-5. Integrar reanudación S3 o degradación explícita.
+5. ~~Integrar reanudación S3 o degradación explícita.~~ Gate fail-closed y
+   fallback polling implementados; rearmado PCI queda pendiente.
 6. Evaluar virtio-blk como segundo consumidor.
 
 ## Evidencia requerida para aceptar la decisión

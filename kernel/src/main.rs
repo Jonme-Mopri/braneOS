@@ -1078,6 +1078,16 @@ fn resume_platform() {
         pic::init();
     }
     let network_ready = net::init();
+    if let Some(result) = xhci::resume_pending_s3() {
+        serial_println!("[xhci] S3 resume result: {:?}", result);
+        tty::tty_println(match result {
+            xhci::XhciS3Resume::Retained => "xHCI resumed with retained rings.",
+            xhci::XhciS3Resume::PollingFallback => "xHCI resumed through the polling fallback.",
+            xhci::XhciS3Resume::Quarantined => {
+                "xHCI state was not retained; controller quarantined."
+            }
+        });
+    }
     serial_println!(
         "[acpi] Resume complete; interrupts restored, keyboard={}, network={}",
         keyboard_ready,

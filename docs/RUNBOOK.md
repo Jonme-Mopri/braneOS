@@ -207,6 +207,11 @@ prompt `brane>` aunque no termine con salto de línea.
 `make release-test` valida además los artefactos versionados y arranca la ISO
 UEFI con OVMF.
 
+`make acpi-xhci-test` es un smoke opt-in para Q35: conecta un controlador
+`qemu-xhci` sin teclado USB, ejecuta el mismo ciclo S3/QMP y registra si la
+retención de rings permite polling o fuerza quarantine. No forma parte de
+`test-all` ni sustituye la evidencia de endpoints HID en hardware físico.
+
 Los targets `boot-test`, `pcie-test`, `usb-hid-test`, `usb-storage-test`,
 `smp-test` e `iso-test` crean un disco FAT32 temporal
 independiente del medio de arranque y fuerzan `disable-modern=on`. Además del
@@ -258,6 +263,7 @@ Jobs actuales:
 | USB HID Test (Q35/QMP) | `make usb-hid-test` |
 | USB Storage Test (Q35/BOT/SCSI) | `make usb-storage-test` |
 | ACPI S3 Test (QEMU/QMP) | `make acpi-test` |
+| ACPI S3 xHCI smoke (Q35/QMP, opt-in) | `make acpi-xhci-test` |
 | Security Tests (QEMU) | `make security-test` |
 | Integration Tests (QEMU) | `make integration-test` |
 | E2E Tests (QEMU) | `make e2e-test` |

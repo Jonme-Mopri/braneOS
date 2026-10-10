@@ -18,10 +18,10 @@
  ─────────────────────────────────────────────────────┼─────────────────────────────────────────────────▶
 ```
 
-**Foco actual:** Fase 13 — cerrar el acknowledgement diferido y la ventana de
-sleep del dispatcher xHCI, y después probar la recuperación S3. MSI-X y MSI ya
-entregan eventos en Q35; polling permanece como fallback. La secuencia,
-rollback y pruebas están definidos en
+**Foco actual:** Fase 13 — completar el rearmado PCI y la validación física
+después del gate S3 de xHCI. MSI-X y MSI ya entregan eventos en Q35; polling
+permanece como fallback y un mismatch de rings termina en quarantine. La
+secuencia, rollback y pruebas están definidos en
 [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
 
 ### Disciplina de cambios por fase
@@ -280,8 +280,8 @@ físico se mantiene en la matriz de release de la Fase 11.
 | Componente | Estado | Prioridad | Dependencia |
 |-----------|--------|-----------|-------------|
 | Enumeración PCI/PCIe robusta | ✅ | ALTA | ECAM/MCFG con fallback CF8/CFC, bridges, multifunction, BAR 32/64 y apertures MMIO medidas/mapeadas |
-| MSI/MSI-X | 🟡 | MEDIA | MSI-X y MSI xHCI armados en Q35 con vector 0x40 y acknowledgement diferido; faltan S3 y hardware físico |
-| Controlador xHCI | 🔄 | ALTA | Control, polling, MSI-X, MSI y bulk listos; faltan múltiples slots, hotplug y resume IRQ |
+| MSI/MSI-X | 🟡 | MEDIA | MSI-X y MSI xHCI armados en Q35 con vector 0x40; gate S3 fail-closed listo, faltan rearmado PCI y hardware físico |
+| Controlador xHCI | 🔄 | ALTA | Control, polling, MSI-X, MSI y bulk listos; gate S3 listo, faltan múltiples slots, hotplug y rearmado IRQ |
 | USB HID | ✅ | ALTA | Teclado boot protocol → TTY en Q35 con 1/4 vCPU; ratón fuera de la baseline |
 | USB mass storage | ✅ | MEDIA | BOT/SCSI LUN 0 read-only → `usb-storage0` → FAT32 `/usb`, Q35 1/4 vCPU |
 | Block layer | ✅ | ALTA | Trait, registry, validación I/O y primer backend real |
@@ -407,9 +407,21 @@ ninguna capability se puede validar.
 (pending bit + EOI) y el trabajo diferido reconoce los dos resúmenes W1C de
 xHCI fuera del contexto de interrupción. El shell comprueba el pending con
 interrupciones desactivadas antes de `sti; hlt`; si ya hay trabajo, continúa sin
-dormir. `cargo test -p brane_os_kernel --lib` (187 pruebas), el build bare-metal
+dormir. `cargo test -p brane_os_kernel --lib` (189 pruebas), el build bare-metal
 y `cargo fmt --all -- --check` pasan. La validación Q35 de dos notificaciones
 consecutivas y la variante de polling quedan en `make pci-interrupt-test`.
+
+**Duodécimo corte implementado:** xHCI participa en el gate ACPI S3. Antes de
+dormir, `xhci::prepare_for_s3()` rechaza transferencias o completions activas,
+enmascara IMAN/USBCMD, espera `Halted` y conserva los punteros de CRCR, DCBAAP,
+CONFIG, ERSTBA y ERDP. Después de restaurar LAPIC/PIC,
+`resume_pending_s3()` valida esos registros y la geometría DMA; si la
+retención no se puede demostrar, detiene DMA y publica `Quarantined`. Cuando
+los punteros sobreviven pero MSI/MSI-X no puede rearmarse de forma verificable,
+el controlador vuelve a polling y publica `PollingFallback`. El smoke opt-in
+`make acpi-xhci-test` cubre Q35 con un xHCI emulado sin teclado USB; la prueba
+ACPI base mantiene la ruta legacy. El gate físico y la recuperación de
+endpoints HID permanecen abiertos.
 
 ---
 
@@ -465,11 +477,11 @@ generation conforme a [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) y
 |---------|-------|
 | **Módulos del kernel** | 40 archivos de módulo (excluye `lib.rs`, `main.rs`, `tests.rs`) |
 | **Líneas de código (Rust)** | ~23,000 |
-| **Unit tests** | 187 (incluye USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
+| **Unit tests** | 189 (incluye USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, registry de vectores, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
 | **Syscalls definidas** | 28 (incluye Kill, SigAction, SigReturn, SigProcMask) |
 | **Harnesses de test Python** | 8 (boot + ACPI S3 + 2 security + 2 integration + 2 e2e) |
 | **CI checks** | 15 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, PCI interrupts, USB HID, USB storage, ACPI S3, security, integration, E2E) |
-| **Make targets de test** | 14 (test, stress-test, iso-test, release-test, boot-test, pcie-test, pci-interrupt-test, usb-hid-test, usb-storage-test, smp-test, acpi-test, security-test, integration-test, e2e-test) |
+| **Make targets de test** | 15 (test, stress-test, iso-test, release-test, boot-test, pcie-test, pci-interrupt-test, usb-hid-test, usb-storage-test, smp-test, acpi-test, acpi-xhci-test, security-test, integration-test, e2e-test) |
 | **Fases completadas** | 11 fases completadas (1–10 y 12); Fase 11 espera gate físico/release |
 
 ---

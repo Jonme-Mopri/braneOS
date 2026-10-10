@@ -12,7 +12,7 @@ BUILD_FLAGS    := -Z build-std=core,compiler_builtins,alloc \
                   --target x86_64-unknown-none
 
 .PHONY: build build-release run run-release test fmt clippy \
-        stress-test test-image boot-test pcie-test pci-interrupt-test usb-hid-test usb-storage-test smp-test acpi-test security-test integration-test e2e-test test-all \
+        stress-test test-image boot-test pcie-test pci-interrupt-test usb-hid-test usb-storage-test smp-test acpi-test acpi-xhci-test security-test integration-test e2e-test test-all \
         docs iso iso-test release-test release parallels-deploy parallels-start parallels-stop parallels-status clean help
 
 # --- Build -------------------------------------------------------------------
@@ -84,6 +84,9 @@ smp-test: test-image ## Boot with four vCPUs and verify AP startup and IPI probe
 
 acpi-test: test-image ## ACPI test: S3 suspend, QMP wake and post-resume shell
 	python3 tests/acpi/test_suspend_resume.py --img $(TEST_IMAGE)
+
+acpi-xhci-test: test-image ## Opt-in ACPI S3 smoke with an emulated, unconnected Q35 xHCI controller
+	python3 tests/acpi/test_suspend_resume.py --img $(TEST_IMAGE) --xhci
 
 security-test: test-image ## Security tests: capability denial + privilege escalation
 	python3 tests/security/test_capability_denial.py --img $(TEST_IMAGE)

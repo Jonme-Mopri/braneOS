@@ -18,15 +18,15 @@ una descripción de diseño no implica por sí sola que exista código ejecutabl
 | Paquetes | 🔲 Diseño `bpkg` | Storage durable, trust root y trusted time |
 | SMP/APIC | ✅ 4 vCPU en QEMU/TCG | Validación física |
 | Almacenamiento | ✅ virtio-blk y USB BOT/SCSI + FAT32 read-only | Escritura persistente |
-| USB/xHCI | ✅ HID y Mass Storage operativos en Q35 | MSI-X/MSI validado en QEMU; múltiples slots y hotplug |
-| Interrupciones PCI | 🟡 MSI-X/MSI xHCI validado en QEMU | S3 y validación física |
+| USB/xHCI | ✅ HID y Mass Storage operativos en Q35 | Gate S3 fail-closed; múltiples slots y hotplug |
+| Interrupciones PCI | 🟡 MSI-X/MSI xHCI validado en QEMU | Rearmado PCI tras S3 y validación física |
 | Release | 🟡 Artefactos y automatización listos | Matriz física y tag v1.0 |
 
-El foco de implementación vigente es la **Fase 13**: cerrar resume S3 y
-validación física del dispatcher xHCI ya validado con HID y Mass Storage en
-MSI-X, con fallback MSI y polling. El acknowledgement W1C y la protección
-contra lost wakeups ya están cubiertos en Q35; el siguiente incremento debe
-validar la retención de rings y endpoints durante S3. El estado detallado y los criterios de salida se mantienen en
+El foco de implementación vigente es la **Fase 13**: completar el rearmado PCI
+y la validación física después del gate S3 de xHCI. El dispatcher ya está
+validado con HID y Mass Storage en MSI-X, con fallback MSI y polling; el
+acknowledgement W1C, la protección contra lost wakeups y la cuarentena
+fail-closed de rings no retenidos están cubiertos en Q35. El estado detallado y los criterios de salida se mantienen en
 [`ROADMAP.md`](ROADMAP.md).
 
 ## Ruta de lectura

@@ -17,7 +17,7 @@ extern crate alloc;
 use crate::apic;
 use crate::{
     acpi, ai, audit, block, brane, dns, memory, module_loader, net, pci, process, sched, security,
-    serial_println, socket, tty, vfs,
+    serial_println, socket, tty, vfs, xhci,
 };
 
 /// Print the shell prompt.
@@ -602,9 +602,36 @@ fn cmd_acpi() {
 }
 
 fn cmd_suspend() {
+    let xhci_token = match xhci::prepare_for_s3() {
+        Ok(token) => token,
+        Err(error) => {
+            use core::fmt::Write;
+
+            let mut buf = [0u8; 96];
+            let mut cursor = WriteBuf::new(&mut buf);
+            let _ = write!(cursor, "xHCI suspend gate failed: {:?}", error);
+            tty::tty_println(cursor.as_str());
+            return;
+        }
+    };
     tty::tty_println("Suspending to ACPI S3...");
     let result = acpi::suspend_s3();
     if let Err(error) = result {
+        if let Some(token) = xhci_token {
+            let resume = xhci::resume_from_s3(token);
+            tty::tty_println(match resume {
+                xhci::XhciS3Resume::Retained => {
+                    "xHCI suspend aborted; controller restored with retained rings."
+                }
+                xhci::XhciS3Resume::PollingFallback => {
+                    "xHCI suspend aborted; controller restored through polling."
+                }
+                xhci::XhciS3Resume::Quarantined => {
+                    "xHCI suspend abort could not validate state; controller quarantined."
+                }
+            });
+            serial_println!("[xhci] S3 abort recovery: {:?}", resume);
+        }
         use core::fmt::Write;
 
         let mut buf = [0u8; 96];
