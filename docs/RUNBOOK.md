@@ -1,6 +1,6 @@
 # RUNBOOK.md - Build, CI y ejecucion local
 
-> Estado: operativo para desarrollo local. Última actualización: 2026-09-15.
+> Estado: operativo para desarrollo local. Última actualización: 2026-10-10.
 > Este documento describe el flujo
 > actual del repositorio, no el release final instalable.
 
@@ -198,8 +198,9 @@ make release-test VERSION=dev
 - kernel bare-metal con `-D warnings`,
 - runner host con `-D warnings`.
 
-`make test-all` ejecuta unit, stress/mutation-fuzz, boot legacy, PCIe ECAM, SMP,
-USB HID y USB storage con 1/4 vCPU, ACPI S3, security, integration y E2E. Los targets QEMU comparten una imagen del kernel release —el
+`make test-all` ejecuta unit, stress/mutation-fuzz, boot legacy, PCIe ECAM,
+interrupciones PCI, SMP, USB HID y USB storage con 1/4 vCPU, ACPI S3, security,
+integration y E2E. Los targets QEMU comparten una imagen del kernel release —el
 ELF debug excede el timeout de carga del bootloader BIOS bajo TCG— y detectan el
 prompt `brane>` aunque no termine con salto de línea.
 
@@ -213,7 +214,7 @@ prompt, exigen el registro de `virtio-blk0`, una transferencia DMA, el montaje
 en `/disk` y la lectura del archivo de prueba mediante el VFS.
 
 `make stress-test` usa semillas fijas para mutar los parsers FAT32, BDP y Brane
-Session, además de los descriptores USB/HID/Mass Storage y wrappers BOT/SCSI;
+Session, el walker PCI y los decoders MSI/MSI-X, además de los descriptores USB/HID/Mass Storage y wrappers BOT/SCSI;
 también compara el frame allocator
 con un modelo de referencia y satura las colas IPC. No requiere QEMU y sus
 fallos son reproducibles.
@@ -253,6 +254,7 @@ Jobs actuales:
 | Release Artifact (ISO) | `make iso-test VERSION=ci` |
 | Boot Test (QEMU) | `python3 tests/boot/test_boot.py` |
 | PCIe ECAM Test (Q35) | `make pcie-test` |
+| PCI Interrupt Test (Q35/QMP) | `make pci-interrupt-test` |
 | USB HID Test (Q35/QMP) | `make usb-hid-test` |
 | USB Storage Test (Q35/BOT/SCSI) | `make usb-storage-test` |
 | ACPI S3 Test (QEMU/QMP) | `make acpi-test` |
@@ -283,9 +285,12 @@ para un disco BOT/SCSI LUN 0 read-only: Q35 valida ambos caminos por separado
 con 1/4 vCPU y mantiene virtio-blk/FAT32. El controlador conserva un solo slot,
 por lo que teclado y disco USB simultáneos, hubs y hotplug permanecen fuera de
 la baseline; la evidencia de storage está en [`USB_STORAGE.md`](USB_STORAGE.md).
-MSI/MSI-X también permanece sin implementar: xHCI y virtio-blk progresan por
-polling. La transición, sus fallbacks y el futuro target
-`make pci-interrupt-test` están especificados en
+Las interrupciones PCI ya están implementadas para xHCI: Q35 usa MSI-X por
+defecto, `make pci-interrupt-test` fuerza también el fallback MSI y comprueba
+dos reportes HID consecutivos mediante `source=irq`; una cuarta ejecución
+deshabilita ambos mecanismos y valida el modo polling. El watchdog conserva
+el dispatcher cuando una plataforma no entrega la señal. Virtio-blk sigue por
+polling. La secuencia, sus límites y la restauración S3 están especificadas en
 [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
 
 La entrada `syscall/sysret` también es una baseline funcional, no una frontera

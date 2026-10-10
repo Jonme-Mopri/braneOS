@@ -292,6 +292,10 @@ jobs:
             suite: usb-storage
             target: usb-storage-test
             boot_timeout: "60"
+          - name: PCI Interrupt Test (Q35/MSI-X/MSI)
+            suite: pci-interrupt
+            target: pci-interrupt-test
+            boot_timeout: "90"
           - name: ACPI S3 Test (QEMU)
             suite: acpi
             target: acpi-test

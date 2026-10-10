@@ -1158,6 +1158,7 @@ mod fuzz_tests {
     use crate::brane_discovery::{DiscoveryPacket, PacketType};
     use crate::brane_session::{SessionPacket, SessionPacketType};
     use crate::fat32::{Fat32BootSector, PartitionEntry, SECTOR_SIZE};
+    use crate::pci::{decode_msi, decode_msix, walk_capabilities};
     use crate::xhci::{
         configuration_total_length, parse_device_descriptor, parse_hid_keyboard_configuration,
         parse_mass_storage_configuration,
@@ -1193,6 +1194,27 @@ mod fuzz_tests {
             let _ = parse_hid_keyboard_configuration(input);
             let _ = parse_mass_storage_configuration(input);
             crate::usb_storage::fuzz_untrusted_storage_bytes(input);
+
+            // PCI configuration-space parsers are also fed untrusted device
+            // bytes. Keep the walker and both interrupt decoders in the same
+            // deterministic mutation corpus; malformed capabilities must
+            // return an error without panicking or indexing past 256 bytes.
+            if len >= 256 {
+                let config = &input[..256];
+                if let Ok(capabilities) = walk_capabilities(config) {
+                    for capability in capabilities.iter() {
+                        match capability.id {
+                            0x05 => {
+                                let _ = decode_msi(config, capability);
+                            }
+                            0x11 => {
+                                let _ = decode_msix(config, capability);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
 
             if let Some((packet, consumed)) = parsed {
                 assert!((4..=input.len()).contains(&consumed));

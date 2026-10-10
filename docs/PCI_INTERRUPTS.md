@@ -1,8 +1,8 @@
 # Interrupciones PCI MSI/MSI-X — especificación de implementación
 
 > Fase: **13 — Hardware I/O y almacenamiento**.
-> Estado: **primer corte implementado; programación y entrega todavía pendientes**.
-> Última actualización: **2026-09-12**.
+> Estado: **MSI-X xHCI y fallback MSI implementados; Q35 valida IRQ y polling**.
+> Última actualización: **2026-10-10**.
 
 ## 1. Objetivo
 
@@ -217,9 +217,9 @@ programa cuándo invocarlo:
 6. Armar la ruta PCI y ejecutar un No Op que produzca un evento.
 7. Exigir que el handler despierte al dispatcher y que éste complete el comando.
 
-El top half xHCI confirma `IMAN.IP`, limpia el pending del interrupter de acuerdo
-con su semántica W1C, marca trabajo y emite EOI. No avanza ERDP. El dispatcher
-diferido consume todos los Event TRB disponibles hasta su presupuesto, actualiza
+El top half xHCI marca trabajo y emite EOI. El dispatcher diferido confirma
+`IMAN.IP` y `USBSTS.EINT` de acuerdo con su semántica W1C después de avanzar
+ERDP; no toma locks de protocolo en el handler. El dispatcher consume todos los Event TRB disponibles hasta su presupuesto, actualiza
 ERDP y conserva completions para Command, EP0, HID, Bulk y cambios de puerto.
 
 `IMOD=0` simplifica la primera prueba. Moderación, varios Interrupters y afinidad
@@ -230,6 +230,13 @@ Esto recupera una notificación perdida sin crear un segundo consumidor ni
 volver al busy-wait continuo.
 
 ## 11. Suspend, resume y degradación
+
+La secuencia siguiente es el diseño objetivo. El corte actual sólo implementa
+el acknowledgement W1C y el fallback polling; todavía no conecta estos hooks
+con `acpi::suspend_s3()` ni puede declarar que los rings, endpoints y el estado
+interno del xHCI sobreviven a S3. Hasta completar esa integración, una pérdida
+de estado debe terminar en quarantine y detener DMA, nunca en una reanudación
+optimista.
 
 Antes de S3, el kernel enmascara la fuente del dispositivo y la capability PCI,
 después drena trabajo ya publicado. Al reanudar:
@@ -259,28 +266,24 @@ motivo. No conserva `Armed` una ruta cuyo destino APIC ya no sea válido.
 
 ### Estado de implementación
 
-El primer incremento ya está en `kernel/src/pci.rs`: el walker de capabilities
-convencionales valida alineación, rango, truncamiento, ciclos y presupuesto sin
-asignaciones; los decoders exponen los campos necesarios de MSI y MSI-X; y el
-constructor de mensajes xAPIC valida el rango reservado `0x40..=0x4F` y el
-destino de ocho bits. Las pruebas host cubren cadenas válidas y malformadas,
-layouts MSI-X y los límites del mensaje APIC. El registry fijo de ownership
-también está implementado: reserva `0x40..=0x4F`, evita duplicados, limita las
-transiciones a estados válidos y libera únicamente una reserva `Failed`. El
-La programación transaccional ya está modelada para una entrada: MSI fuerza un
-solo mensaje y conserva bits no relacionados; MSI-X valida BIR, tamaño de
-entrada y apertura medida antes de escribir enmascarado y publicar el vector.
-Los fallos dejan la entrada intacta. El siguiente incremento conectará estas
-operaciones al config space/MMIO real y al dispatcher xHCI.
+El walker, los decoders y el registry fijo están implementados en
+`kernel/src/pci.rs`. El camino bare-metal valida la capability contra el
+inventario de BARs medidos, mantiene MSI/MSI-X deshabilitado y la entrada
+enmascarada mientras publica address/data, y reserva el vector antes de
+anunciar `Armed`. Los accesos ECAM/CF8/CFC de la transacción se serializan; MSI
+preserva MMC y los bits no relacionados, y MSI-X valida la tabla completa y la
+PBA dentro de apertures de memoria. El EOI del LAPIC usa una dirección atómica
+prepublicada para que el wrapper de IDT no tome el lock del runtime.
 
-La IDT ya instala wrappers para todo `0x40..=0x4F`. Cada top half sólo marca un
+La IDT instala wrappers para todo `0x40..=0x4F`. Cada top half sólo marca un
 bit pendiente con `Release` y emite EOI; `take_interrupt_pending` lo retira con
 `Acquire`, dejando el consumo del Event Ring fuera del contexto de interrupción.
-El bucle de la shell llama a `xhci::service_interrupt_once()` después de cada
-`hlt`; esa rutina drena hasta `RUNTIME_EVENT_BUDGET` eventos y deja que
-`poll_hid_once()` procese la completion y rearme el endpoint. La ruta no arma
-todavía MSI/MSI-X en hardware, por lo que el arranque conserva polling hasta
-que el consumidor xHCI complete la transacción de configuración.
+El bucle de la shell llama a `xhci::service_interrupt_once()` antes y después
+del reposo; con interrupciones desactivadas comprueba el pending antes de
+`enable_and_hlt`. La rutina drena hasta `RUNTIME_EVENT_BUDGET`, reencola el vector si el
+presupuesto se agota y deja que `poll_hid_once()` procese la completion y rearme
+el endpoint. En Q35, tanto MSI-X como MSI producen `source=irq`; el watchdog
+queda como recuperación cuando una plataforma no entrega la señal.
 
 ## 13. Estrategia de pruebas
 
@@ -306,12 +309,13 @@ debe exigir marcadores inequívocos:
 
 ```text
 [pci-irq] xhci0: mode=msix|msi vector=0x40 destination=...
-[xhci] Interrupt probe: vector=0x40 handled=1 dispatched=1 completion=success
-[pci-irq] polling watchdog: lost=0
+[xhci] deferred interrupt dispatch: events=1, source=irq|watchdog
 ```
 
 La sonda debe completarse sin que la ruta de espera gire millones de veces. El
-test se repite con 1 y 4 vCPU, y mantiene virtio-blk/FAT32, USB HID, USB storage
+test se repite con 1 y 4 vCPU, fuerza además `msix=off,msi=on` para el fallback
+MSI y ejecuta una variante con ambos mecanismos deshabilitados para polling;
+mantiene virtio-blk/FAT32, USB HID, USB storage
 y boot sin USB como regresiones según estén disponibles.
 
 Una variante debe ocultar o invalidar de forma simulada MSI-X para demostrar

@@ -6,7 +6,7 @@
 //! by host-side tests; only the bare-metal bring-up maps the MMIO pages.
 
 #[cfg(target_os = "none")]
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(target_os = "none")]
 use spin::Mutex;
 #[cfg(target_os = "none")]
@@ -491,6 +491,10 @@ struct ApicRuntime {
 static APIC_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "none")]
 static APIC_RUNTIME: Mutex<Option<ApicRuntime>> = Mutex::new(None);
+/// Cached EOI MMIO address used by interrupt wrappers.  The top half must not
+/// take `APIC_RUNTIME`'s spinlock: an interrupt can preempt code that holds it.
+#[cfg(target_os = "none")]
+static APIC_EOI_ADDRESS: AtomicU64 = AtomicU64::new(0);
 
 /// Whether hardware IRQ acknowledgements should be sent to the Local APIC.
 pub fn is_active() -> bool {
@@ -507,6 +511,7 @@ pub fn is_active() -> bool {
 /// Stop APIC acknowledgements while the legacy PIC is being restored.
 #[cfg(target_os = "none")]
 pub fn deactivate() {
+    APIC_EOI_ADDRESS.store(0, Ordering::Release);
     APIC_ACTIVE.store(false, Ordering::Release);
 }
 
@@ -517,18 +522,21 @@ pub fn deactivate() {}
 ///
 /// Returns `false` when APIC routing is not active, allowing the caller to
 /// acknowledge the same vector through the legacy PIC.
+#[cfg(target_os = "none")]
 pub fn end_of_interrupt() -> bool {
-    #[cfg(target_os = "none")]
-    {
-        if !APIC_ACTIVE.load(Ordering::Acquire) {
-            return false;
-        }
-        if let Some(runtime) = *APIC_RUNTIME.lock() {
-            unsafe { runtime.local.end_of_interrupt() };
-            return true;
-        }
-        APIC_ACTIVE.store(false, Ordering::Release);
+    let address = APIC_EOI_ADDRESS.load(Ordering::Acquire);
+    if !APIC_ACTIVE.load(Ordering::Acquire) || address == 0 {
+        return false;
     }
+    // This is the only operation required for an EOI and is safe to do
+    // directly from the interrupt wrapper.  The cached address is published
+    // before APIC_ACTIVE during activation.
+    unsafe { core::ptr::write_volatile(address as *mut u32, 0) };
+    true
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn end_of_interrupt() -> bool {
     false
 }
 
@@ -694,6 +702,10 @@ where
             timer_entry,
             keyboard_entry,
         });
+        APIC_EOI_ADDRESS.store(
+            local.register_address(LOCAL_APIC_EOI).unwrap_or(0),
+            Ordering::Release,
+        );
         mask_pic();
         APIC_ACTIVE.store(true, Ordering::Release);
         if let Some(runtime) = *APIC_RUNTIME.lock() {

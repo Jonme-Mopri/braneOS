@@ -10,6 +10,8 @@
 
 use spin::Mutex;
 
+mod interrupts;
+
 #[cfg(target_os = "none")]
 use core::sync::atomic::AtomicU16;
 #[cfg(target_os = "none")]
@@ -444,6 +446,10 @@ impl PciCapabilities {
         self.count
     }
 
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = PciCapability> + '_ {
         self.entries[..self.count].iter().flatten().copied()
     }
@@ -469,7 +475,7 @@ pub fn walk_capabilities(config: &[u8]) -> Result<PciCapabilities, CapabilityErr
     let mut visited = [false; 64];
     let mut result = PciCapabilities::empty();
     while pointer != 0 {
-        if pointer < 0x40 || pointer > 0xFC || pointer & 3 != 0 {
+        if !(0x40..=0xFC).contains(&pointer) || pointer & 3 != 0 {
             return Err(if pointer & 3 != 0 {
                 CapabilityError::MisalignedPointer
             } else {
@@ -524,10 +530,24 @@ pub fn decode_msi(
         return Err(CapabilityError::Truncated);
     }
     let offset = capability.offset as usize;
-    if offset + 4 > config.len() {
+    if offset.checked_add(4).is_none_or(|end| end > config.len()) {
         return Err(CapabilityError::Truncated);
     }
     let control = u16::from_le_bytes([config[offset + 2], config[offset + 3]]);
+    let message_words = if control & (1 << 7) != 0 { 3 } else { 2 };
+    let required = offset
+        .checked_add(4 + message_words * 4)
+        .and_then(|end| {
+            if control & (1 << 8) != 0 {
+                end.checked_add(8)
+            } else {
+                Some(end)
+            }
+        })
+        .ok_or(CapabilityError::Truncated)?;
+    if required > config.len() {
+        return Err(CapabilityError::Truncated);
+    }
     Ok(MsiCapability {
         offset: capability.offset,
         is_64_bit: control & (1 << 7) != 0,
@@ -723,8 +743,20 @@ pub fn interrupt_top_half(vector: u8) {
     }
 }
 
+/// Requeue deferred work after a bounded dispatcher pass.  This is used when
+/// the event ring still may contain entries after the per-iteration budget;
+/// it keeps the wakeup edge from being lost without touching device MMIO in
+/// the interrupt wrapper.
+#[cfg(target_os = "none")]
+pub fn requeue_interrupt_pending(vector: u8) {
+    interrupt_top_half(vector);
+}
+
 #[cfg(not(target_os = "none"))]
 pub fn interrupt_top_half(_vector: u8) {}
+
+#[cfg(not(target_os = "none"))]
+pub fn requeue_interrupt_pending(_vector: u8) {}
 
 #[cfg(target_os = "none")]
 pub fn take_interrupt_pending(vector: u8) -> bool {
@@ -735,8 +767,24 @@ pub fn take_interrupt_pending(vector: u8) -> bool {
     PCI_PENDING_VECTORS.fetch_and(!mask, Ordering::Acquire) & mask != 0
 }
 
+/// Observe a pending vector without consuming it. Callers use this while
+/// interrupts are disabled immediately before `enable_and_hlt`, which closes
+/// the check-to-sleep lost-wakeup window.
+#[cfg(target_os = "none")]
+pub fn interrupt_pending(vector: u8) -> bool {
+    let Ok(index) = PciVectorRegistry::index(vector) else {
+        return false;
+    };
+    PCI_PENDING_VECTORS.load(Ordering::Acquire) & (1u16 << index) != 0
+}
+
 #[cfg(not(target_os = "none"))]
 pub fn take_interrupt_pending(_vector: u8) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn interrupt_pending(_vector: u8) -> bool {
     false
 }
 
@@ -764,6 +812,9 @@ pub enum InterruptProgrammingError {
     InvalidBar,
     TableOutsideBar,
     InvalidEntry,
+    AlreadyEnabled,
+    ReadbackFailed,
+    RollbackFailed,
 }
 
 /// Program one MSI message while preserving unrelated control bits. The
@@ -779,8 +830,7 @@ pub fn program_msi(
     }
     let original = *state;
     let mut control = state.control;
-    control &= !(0x7 << 4); // force one message regardless of MMC
-    control &= !(0x7 << 1); // MME = zero
+    control &= !(0x7 << 4); // MME = zero; preserve read-only MMC bits 1..3
     control &= !(1 << 0); // MSI disabled while publishing the message
     state.control = control;
     state.address_low = message.address;
@@ -791,7 +841,6 @@ pub fn program_msi(
     if capability.per_vector_masking {
         state.mask_bits |= 1;
     }
-    state.command |= COMMAND_MEMORY_SPACE;
     // A reserved vector can be armed by the caller after the device source is
     // configured; this function intentionally leaves MSI disabled.
     if state.address_low != message.address || state.data != message.data {
@@ -1581,6 +1630,244 @@ pub fn enumerate_with(access: &mut impl PciConfigAccess) -> PciInventory {
 }
 
 pub static PCI_INVENTORY: Mutex<PciInventory> = Mutex::new(PciInventory::new());
+pub static PCI_VECTOR_OWNERS: Mutex<PciVectorRegistry> = Mutex::new(PciVectorRegistry::new());
+
+// These helpers are private to the serialized interrupt setup. Only enumerated
+// functions are accepted, so ECAM cannot dereference an unmapped BDF page.
+#[cfg(target_os = "none")]
+fn config_read_u32_locked(address: PciAddress, offset: u16) -> u32 {
+    if ACTIVE_CONFIG_BACKEND.load(Ordering::Acquire) == 1 {
+        let register = EcamConfigAccess::config_virtual_address(address, offset).unwrap();
+        unsafe { core::ptr::read_volatile(register as *const u32) }
+    } else {
+        LegacyConfigAccess.read_u32(address, offset)
+    }
+}
+
+#[cfg(target_os = "none")]
+fn config_read_u16_locked(address: PciAddress, offset: u16) -> u16 {
+    (config_read_u32_locked(address, offset & !3) >> ((offset & 2) * 8)) as u16
+}
+
+#[cfg(target_os = "none")]
+fn config_write_u16_locked(address: PciAddress, offset: u16, value: u16) {
+    // Native word access must not echo adjacent read-only or W1C fields.
+    if ACTIVE_CONFIG_BACKEND.load(Ordering::Acquire) == 1 {
+        let register = EcamConfigAccess::config_virtual_address(address, offset).unwrap();
+        unsafe { core::ptr::write_volatile(register as *mut u16, value) };
+    } else {
+        unsafe {
+            Port::<u32>::new(CONFIG_ADDRESS_PORT)
+                .write(address.config_address(offset & !3).unwrap());
+            Port::<u16>::new(CONFIG_DATA_PORT + (offset & 2)).write(value);
+        }
+    }
+}
+
+#[cfg(target_os = "none")]
+fn config_write_u32_locked(address: PciAddress, offset: u16, value: u32) {
+    if ACTIVE_CONFIG_BACKEND.load(Ordering::Acquire) == 1 {
+        let register = EcamConfigAccess::config_virtual_address(address, offset).unwrap();
+        unsafe { core::ptr::write_volatile(register as *mut u32, value) };
+    } else {
+        LegacyConfigAccess.write_u32(address, offset, value);
+    }
+}
+
+#[cfg(target_os = "none")]
+struct HardwareInterruptIo {
+    address: PciAddress,
+    capability: u16,
+    table: Option<u64>,
+    address_high: bool,
+}
+
+#[cfg(target_os = "none")]
+impl HardwareInterruptIo {
+    fn config_offset(&self, register: interrupts::Register) -> u16 {
+        use interrupts::Register::*;
+        self.capability
+            + match register {
+                Control => 2,
+                AddressLow => 4,
+                AddressHigh => 8,
+                Data => {
+                    if self.address_high {
+                        12
+                    } else {
+                        8
+                    }
+                }
+                Mask => {
+                    if self.address_high {
+                        16
+                    } else {
+                        12
+                    }
+                }
+            }
+    }
+
+    fn table_register(&self, register: interrupts::Register) -> Option<u64> {
+        use interrupts::Register::*;
+        let base = self.table?;
+        Some(
+            base + match register {
+                Control => return None,
+                AddressLow => 0,
+                AddressHigh => 4,
+                Data => 8,
+                Mask => 12,
+            },
+        )
+    }
+}
+
+#[cfg(target_os = "none")]
+impl interrupts::InterruptIo for HardwareInterruptIo {
+    fn read(&mut self, register: interrupts::Register) -> u32 {
+        if let Some(pointer) = self.table_register(register) {
+            return unsafe { core::ptr::read_volatile(pointer as *const u32) };
+        }
+        let offset = self.config_offset(register);
+        if matches!(
+            register,
+            interrupts::Register::Control | interrupts::Register::Data
+        ) {
+            u32::from(config_read_u16_locked(self.address, offset))
+        } else {
+            config_read_u32_locked(self.address, offset)
+        }
+    }
+
+    fn write(&mut self, register: interrupts::Register, value: u32) {
+        if let Some(pointer) = self.table_register(register) {
+            unsafe { core::ptr::write_volatile(pointer as *mut u32, value) };
+            return;
+        }
+        let offset = self.config_offset(register);
+        if matches!(
+            register,
+            interrupts::Register::Control | interrupts::Register::Data
+        ) {
+            config_write_u16_locked(self.address, offset, value as u16);
+        } else {
+            config_write_u32_locked(self.address, offset, value);
+        }
+    }
+}
+
+/// Select MSI-X, then MSI, with checked readback/rollback. The caller must keep
+/// the controller interrupt source disabled until this returns. A failed
+/// rollback retains ownership and stops the fallback sequence.
+#[cfg(target_os = "none")]
+pub(crate) fn arm_interrupts_for_device(
+    device: PciDevice,
+    mmio: MmioMapping,
+    vector: u8,
+    destination: u8,
+) -> Result<PciInterruptMode, InterruptProgrammingError> {
+    let message = apic_msi_message(vector, destination)
+        .ok_or(InterruptProgrammingError::InvalidCapability)?;
+    if find_device(|entry| entry.address == device.address) != Some(device) {
+        return Err(InterruptProgrammingError::InvalidCapability);
+    }
+    let _config_guard = CONFIG_ACCESS_LOCK.lock();
+    let mut config = [0u8; 256];
+    for offset in (0..256u16).step_by(4) {
+        config[offset as usize..offset as usize + 4]
+            .copy_from_slice(&config_read_u32_locked(device.address, offset).to_le_bytes());
+    }
+    let caps =
+        walk_capabilities(&config).map_err(|_| InterruptProgrammingError::InvalidCapability)?;
+    let msix = caps
+        .find(0x11)
+        .map(|cap| decode_msix(&config, cap))
+        .transpose()
+        .map_err(|_| InterruptProgrammingError::InvalidCapability)?;
+    let msi = caps
+        .find(0x05)
+        .map(|cap| decode_msi(&config, cap))
+        .transpose()
+        .map_err(|_| InterruptProgrammingError::InvalidCapability)?;
+    // Never take over a route left enabled by another owner/firmware, nor
+    // allow two simultaneously enabled mechanisms on the same function.
+    for (offset, enable) in msix
+        .map(|cap| (cap.offset, 1 << 15))
+        .into_iter()
+        .chain(msi.map(|cap| (cap.offset, 1)))
+    {
+        let control =
+            u16::from_le_bytes([config[offset as usize + 2], config[offset as usize + 3]]);
+        if control & enable != 0 {
+            return Err(InterruptProgrammingError::AlreadyEnabled);
+        }
+    }
+    let mut owners = PCI_VECTOR_OWNERS.lock();
+    let mut last_error = InterruptProgrammingError::InvalidCapability;
+    for mode in [PciInterruptMode::Msix, PciInterruptMode::Msi] {
+        let (mut io, layout) = match mode {
+            PciInterruptMode::Msix => {
+                let Some(cap) = msix else { continue };
+                let table = match interrupts::entry_address(device, mmio, cap) {
+                    Ok(table) => table,
+                    Err(error) => {
+                        last_error = error;
+                        continue;
+                    }
+                };
+                (
+                    HardwareInterruptIo {
+                        address: device.address,
+                        capability: u16::from(cap.offset),
+                        table: Some(table),
+                        address_high: true,
+                    },
+                    interrupts::Layout {
+                        msix: true,
+                        address_high: true,
+                        masking: true,
+                    },
+                )
+            }
+            PciInterruptMode::Msi => {
+                let Some(cap) = msi else { continue };
+                (
+                    HardwareInterruptIo {
+                        address: device.address,
+                        capability: u16::from(cap.offset),
+                        table: None,
+                        address_high: cap.is_64_bit,
+                    },
+                    interrupts::Layout {
+                        msix: false,
+                        address_high: cap.is_64_bit,
+                        masking: cap.per_vector_masking,
+                    },
+                )
+            }
+            PciInterruptMode::Polling => unreachable!(),
+        };
+        owners
+            .reserve(vector, device.address, mode, destination)
+            .map_err(|_| InterruptProgrammingError::InvalidCapability)?;
+        match interrupts::program(&mut io, layout, message) {
+            Ok(()) => {
+                owners.transition(vector, PciVectorState::Armed).unwrap();
+                return Ok(mode);
+            }
+            Err(error) => {
+                owners.transition(vector, PciVectorState::Failed).unwrap();
+                if error == InterruptProgrammingError::RollbackFailed {
+                    return Err(error);
+                }
+                owners.release_failed(vector).unwrap();
+                last_error = error;
+            }
+        }
+    }
+    Err(last_error)
+}
 
 /// Discover PCI topology through ECAM when ACPI supplied a usable segment-zero
 /// region, otherwise through the legacy CF8/CFC backend.
@@ -2021,7 +2308,7 @@ mod tests {
     #[test]
     fn programs_msi_preserving_capability_bits_and_masking_until_commit() {
         let mut state = MsiConfigState {
-            control: (1 << 7) | (3 << 4) | (1 << 8),
+            control: (1 << 7) | (5 << 1) | (3 << 4) | (1 << 8),
             address_low: 0,
             address_high: 0xDEAD_BEEF,
             data: 0,
@@ -2043,8 +2330,9 @@ mod tests {
         assert_eq!(state.address_high, 0);
         assert_eq!(state.data, u16::from(PCI_VECTOR_FIRST));
         assert_ne!(state.control & 1, 0);
-        assert_eq!(state.control & (0x7 << 1), 0);
+        assert_eq!(state.control & (0x7 << 1), 5 << 1);
         assert_eq!(state.command & COMMAND_BUS_MASTER, COMMAND_BUS_MASTER);
+        assert_eq!(state.command & COMMAND_MEMORY_SPACE, 0);
         assert_eq!(state.mask_bits & 1, 0);
     }
 

@@ -4,8 +4,9 @@
 //! Address Array, Command Ring and one polling Event Ring. Supported Protocol
 //! capabilities and root ports are inspected, and the first connected device
 //! is enumerated through its default control pipe. A HID boot-keyboard endpoint
-//! is configured and kept armed through bounded polling. MSI/MSI-X remains a
-//! later Phase 13 increment.
+//! is configured and kept armed through a single Event Ring consumer. Q35 uses
+//! MSI-X vector 0x40 when the capability and measured BAR validate; polling
+//! remains the fallback.
 
 #![allow(dead_code)]
 
@@ -46,12 +47,16 @@ const PORTSC: u64 = 0;
 
 // Primary interrupter registers, relative to the runtime base.
 const ERSTSZ: u64 = 0x28;
+const IMAN: u64 = 0x20;
+const IMOD: u64 = 0x24;
 const ERSTBA: u64 = 0x30;
 const ERDP: u64 = 0x38;
 
 const USBCMD_RUN_STOP: u32 = 1 << 0;
+const USBCMD_INTE: u32 = 1 << 2;
 const USBCMD_HOST_CONTROLLER_RESET: u32 = 1 << 1;
 const USBSTS_HOST_CONTROLLER_HALTED: u32 = 1 << 0;
+const USBSTS_EVENT_INTERRUPT: u32 = 1 << 3;
 const USBSTS_CONTROLLER_NOT_READY: u32 = 1 << 11;
 const USBSTS_HOST_CONTROLLER_ERROR: u32 = 1 << 12;
 
@@ -168,6 +173,8 @@ pub struct XhciControllerInfo {
     pub mass_storage_bulk_in_packet: u16,
     pub mass_storage_bulk_out_packet: u16,
     pub command_probe_completed: bool,
+    pub interrupt_mode: pci::PciInterruptMode,
+    pub interrupt_vector: u8,
     pub running: bool,
 }
 
@@ -1198,6 +1205,8 @@ fn parse_capabilities(
         mass_storage_bulk_in_packet: 0,
         mass_storage_bulk_out_packet: 0,
         command_probe_completed: false,
+        interrupt_mode: pci::PciInterruptMode::Polling,
+        interrupt_vector: 0,
         running: false,
     })
 }
@@ -1782,6 +1791,27 @@ fn allocate_device(
 
 #[cfg(target_os = "none")]
 impl XhciController {
+    /// Acknowledge the two xHCI W1C interrupt summaries after the Event Ring
+    /// consumer has advanced ERDP. The IDT top half only raises the pending
+    /// bit; MMIO is deliberately kept out of interrupt context.
+    fn acknowledge_interrupt(&mut self) -> Result<(), XhciInitError> {
+        let iman = read_mmio_u32(self.info.mmio, self.layout.runtime(IMAN))?;
+        if iman & 1 != 0 {
+            // IMAN.IP is W1C while IMAN.IE is R/W. Preserve enable state.
+            write_mmio_u32(self.info.mmio, self.layout.runtime(IMAN), iman | 1)?;
+        }
+        let status = read_mmio_u32(self.info.mmio, self.layout.operational(USBSTS))?;
+        if status & USBSTS_EVENT_INTERRUPT != 0 {
+            // USBSTS.EINT is W1C; do not write unrelated status bits.
+            write_mmio_u32(
+                self.info.mmio,
+                self.layout.operational(USBSTS),
+                USBSTS_EVENT_INTERRUPT,
+            )?;
+        }
+        Ok(())
+    }
+
     fn advance_command_ring(&mut self) -> Result<(), XhciInitError> {
         self.command_enqueue_index += 1;
         if self.command_enqueue_index == COMMAND_RING_USABLE_TRBS {
@@ -2760,7 +2790,12 @@ pub fn poll_hid_once() {
 /// consumer so an interrupt cannot execute protocol work in the top half.
 #[cfg(target_os = "none")]
 pub fn service_interrupt_once() {
-    if !pci::take_interrupt_pending(pci::PCI_VECTOR_FIRST) {
+    let interrupt_pending = pci::take_interrupt_pending(pci::PCI_VECTOR_FIRST);
+    let watchdog = XHCI_CONTROLLER
+        .get()
+        .map(|controller| controller.lock().info.interrupt_mode != pci::PciInterruptMode::Polling)
+        .unwrap_or(false);
+    if !interrupt_pending && !watchdog {
         return;
     }
     let result = {
@@ -2773,13 +2808,28 @@ pub fn service_interrupt_once() {
             while handled < RUNTIME_EVENT_BUDGET && controller.dispatch_one_event()? {
                 handled += 1;
             }
+            // Clear device-level interrupt summaries only after advancing
+            // ERDP. A final bounded pass catches an event arriving while the
+            // first pass is being acknowledged.
+            controller.acknowledge_interrupt()?;
+            if handled < RUNTIME_EVENT_BUDGET && controller.dispatch_one_event()? {
+                handled += 1;
+                controller.acknowledge_interrupt()?;
+            }
+            if handled == RUNTIME_EVENT_BUDGET {
+                pci::requeue_interrupt_pending(pci::PCI_VECTOR_FIRST);
+            }
             Ok::<usize, XhciInitError>(handled)
         })();
         (result, handled)
     };
     match result {
         (Ok(handled), _) if handled != 0 => {
-            crate::serial_println!("[xhci] deferred interrupt dispatch: events={}", handled);
+            crate::serial_println!(
+                "[xhci] deferred interrupt dispatch: events={}, source={}",
+                handled,
+                if interrupt_pending { "irq" } else { "watchdog" }
+            );
         }
         (Ok(_), _) => {}
         (Err(error), _) => {
@@ -2927,7 +2977,40 @@ pub fn init(
     )?;
     fence(Ordering::SeqCst);
 
+    let mut interrupt_mode = pci::PciInterruptMode::Polling;
+    let mut interrupt_vector = 0;
+    if let Some(destination) = crate::apic::current_local_apic_id() {
+        if let Ok(mode) =
+            pci::arm_interrupts_for_device(device, mmio, pci::PCI_VECTOR_FIRST, destination)
+        {
+            write_mmio_u32(mmio, layout.runtime(IMAN), 1)?;
+            write_mmio_u32(mmio, layout.runtime(IMOD), 0)?;
+            write_mmio_u32(mmio, layout.runtime(IMAN), 1 << 1)?;
+            interrupt_mode = mode;
+            interrupt_vector = pci::PCI_VECTOR_FIRST;
+            crate::serial_println!(
+                "[pci-irq] xhci0: mode={} vector=0x{:02X} destination={}",
+                match mode {
+                    pci::PciInterruptMode::Msix => "msix",
+                    pci::PciInterruptMode::Msi => "msi",
+                    pci::PciInterruptMode::Polling => "polling",
+                },
+                interrupt_vector,
+                destination
+            );
+        } else {
+            crate::serial_println!("[pci-irq] xhci0: mode=polling (MSI-X/MSI unavailable)");
+        }
+    }
+
     write_mmio_u32(mmio, layout.operational(USBCMD), USBCMD_RUN_STOP)?;
+    if interrupt_mode != pci::PciInterruptMode::Polling {
+        write_mmio_u32(
+            mmio,
+            layout.operational(USBCMD),
+            USBCMD_RUN_STOP | USBCMD_INTE,
+        )?;
+    }
     wait_for_bits(
         mmio,
         layout.operational(USBSTS),
@@ -2944,6 +3027,8 @@ pub fn init(
     info.command_ring_trbs = COMMAND_RING_USABLE_TRBS;
     info.event_ring_trbs = EVENT_RING_TRBS;
     info.supported_protocols = protocols.count;
+    info.interrupt_mode = interrupt_mode;
+    info.interrupt_vector = interrupt_vector;
     info.running = true;
 
     let mut controller = XhciController {

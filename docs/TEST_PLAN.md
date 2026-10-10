@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §18.  
 > Estado: **Activo**.  
-> Última actualización: **2026-09-15**
+> Última actualización: **2026-10-10**
 
 ---
 
@@ -183,12 +183,13 @@ GitHub Actions valida en cada `push` y `pull_request` hacia `main`:
 | Formatting | Activo | `cargo fmt --all -- --check` |
 | Clippy | Activo | Kernel bare-metal + runner host con `-D warnings` |
 | Kernel unit tests | Activo | `cargo test -p brane_os_kernel --lib` |
-| **Storage/USB host** | **Activo** | xHCI USB/HID/Bulk, BOT/SCSI y recovery negativo, MCFG/ECAM, PCI, block, DMA, virtqueue y FAT32 (178 tests totales) |
+| **Storage/USB host** | **Activo** | xHCI USB/HID/Bulk, BOT/SCSI y recovery negativo, MCFG/ECAM, PCI, block, DMA, virtqueue y FAT32 (187 tests totales) |
 | **Stress y mutation-fuzz** | **Activo** | `make stress-test` (parsers, allocator, IPC y dispatcher SMP concurrente) |
 | **Release artifact (ISO UEFI)** | **Activo** | `make iso-test VERSION=ci` (ISO, checksum y boot con OVMF) |
 | **Boot test (QEMU)** | **Activo** | Kernel release + FAT32 virtio legacy read-only; exige LBA0, montaje `/disk` y lectura VFS real |
 | **PCIe ECAM test (Q35)** | **Activo** | `make pcie-test` exige MCFG/ECAM, virtio-blk/FAT32 y enumeración/configuración del `usb-kbd` por xHCI |
 | **USB HID test (Q35/QMP)** | **Activo** | `make usb-hid-test` inyecta `u`, exige Transfer Event propio y entrega TTY con 1 y 4 vCPU |
+| **PCI interrupt test (Q35/QMP)** | **Activo** | `make pci-interrupt-test` valida MSI-X y MSI por IRQ, acknowledgement W1C, dos eventos consecutivos y fallback polling |
 | **USB storage test (Q35)** | **Activo** | `make usb-storage-test` descubre BOT/SCSI LUN 0, registra `usb-storage0`, monta FAT32 en `/usb` y conserva `/disk` con 1 y 4 vCPU |
 | **SMP/AP startup test (QEMU)** | **Activo** | `make smp-test` (4 vCPU, INIT/SIPI, estado per-CPU, 8 rondas acotadas y workers reales en CPU1–CPU3) |
 | **SMP run-queue + dispatcher model (host)** | **Activo** | `cargo test -p brane_os_kernel --lib sched::multicore_tests` (balanceo, steal, ownership y retorno al idle entre quanta) |
@@ -240,9 +241,11 @@ La validación local equivalente recomendada está documentada en
 18. ~~Fase 13: USB Mass Storage Bulk-Only, perfil SCSI read-only, registro como
     `BlockDevice` y montaje FAT32.~~ ✅ **Completado** (178 tests/fuzz + recovery
     negativo + `usb-storage0` → `/usb` en Q35 con 1/4 vCPU, conservando `/disk`)
-19. Fase 13: capability walker PCI, MSI-X con fallback MSI/polling y dispatcher
-    xHCI diferido; diseño y criterio de salida en
-    [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
+19. ~~Fase 13: capability walker PCI, MSI-X/MSI y dispatcher xHCI diferido.~~ ✅
+    **Completado parcialmente** (`make pci-interrupt-test` pasa con 1/4 vCPU y
+    una ejecución `msix=off,msi=on`; Q35 arma vector `0x40`, reconoce `IMAN.IP`
+    y `USBSTS.EINT`, y valida dos completions HID por IRQ). S3 y hardware físico
+    permanecen abiertos según [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
 20. Fase 14: metadata exhaustiva de syscalls, user-copy, mediación por
     capability, auditoría terminal y retorno ring 3 seguro; especificación en
     [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md).
@@ -270,11 +273,12 @@ La validación local equivalente recomendada está documentada en
 | `make test-image` | Compila una imagen compartida con el kernel release |
 | `make boot-test` | Boot test del kernel release en QEMU/TCG (60 s) |
 | `make pcie-test` | Boot Q35; valida ACPI MCFG, PCIe ECAM y storage real |
+| `make pci-interrupt-test` | Q35/QMP con 1/4 vCPU + fallback MSI; valida xHCI vector 0x40 y dispatcher diferido |
 | `make usb-hid-test` | Q35/QMP con 1/4 vCPU; valida descriptor, endpoint interrupt IN y TTY |
 | `make smp-test` | Boot con 4 vCPU, hand-off real y ejecución verificada en cada AP |
 | `make acpi-test` | S3, shell post-resume y `yield` aislado del BSP en QEMU/QMP (120 s) |
 | `make security-test` | Security tests en QEMU |
 | `make integration-test` | Integration tests en QEMU |
 | `make e2e-test` | E2E tests en QEMU |
-| `make test-all` | Suite completa (unit → stress/fuzz → boot/PCIe/USB → SMP → ACPI → security → integration → e2e) |
+| `make test-all` | Suite completa (unit → stress/fuzz → boot/PCIe/interrupts/USB → SMP → ACPI → security → integration → e2e) |
 | `make docs` | Genera API docs con `cargo doc` |

@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §19.  
 > Estado: **Activo** — se actualiza conforme el proyecto avanza.  
-> Última actualización: **2026-09-15**
+> Última actualización: **2026-10-10**
 
 ---
 
@@ -18,9 +18,10 @@
  ─────────────────────────────────────────────────────┼─────────────────────────────────────────────────▶
 ```
 
-**Foco actual:** Fase 13 — completar la entrega de eventos xHCI mediante MSI-X, con
-fallback MSI y polling, conservando el dispatcher único ya validado por USB HID
-y Mass Storage. La secuencia, rollback y pruebas están definidos en
+**Foco actual:** Fase 13 — cerrar el acknowledgement diferido y la ventana de
+sleep del dispatcher xHCI, y después probar la recuperación S3. MSI-X y MSI ya
+entregan eventos en Q35; polling permanece como fallback. La secuencia,
+rollback y pruebas están definidos en
 [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
 
 ### Disciplina de cambios por fase
@@ -279,8 +280,8 @@ físico se mantiene en la matriz de release de la Fase 11.
 | Componente | Estado | Prioridad | Dependencia |
 |-----------|--------|-----------|-------------|
 | Enumeración PCI/PCIe robusta | ✅ | ALTA | ECAM/MCFG con fallback CF8/CFC, bridges, multifunction, BAR 32/64 y apertures MMIO medidas/mapeadas |
-| MSI/MSI-X | 🟡 | MEDIA | Walker, decoders, ownership, modelos transaccionales, wrappers IDT y dispatcher xHCI diferido; falta conexión real y fallback |
-| Controlador xHCI | 🔄 | ALTA | Control, interrupt y bulk listos; faltan MSI/MSI-X, múltiples slots y hotplug |
+| MSI/MSI-X | 🟡 | MEDIA | MSI-X y MSI xHCI armados en Q35 con vector 0x40 y acknowledgement diferido; faltan S3 y hardware físico |
+| Controlador xHCI | 🔄 | ALTA | Control, polling, MSI-X, MSI y bulk listos; faltan múltiples slots, hotplug y resume IRQ |
 | USB HID | ✅ | ALTA | Teclado boot protocol → TTY en Q35 con 1/4 vCPU; ratón fuera de la baseline |
 | USB mass storage | ✅ | MEDIA | BOT/SCSI LUN 0 read-only → `usb-storage0` → FAT32 `/usb`, Q35 1/4 vCPU |
 | Block layer | ✅ | ALTA | Trait, registry, validación I/O y primer backend real |
@@ -373,10 +374,10 @@ Mass Storage Reset, limpia ambos halts y sincroniza los endpoints xHCI; tests
 negativos simulan phase error, CSW inválido y timeout sin reutilización. Los 178
 tests host y `make usb-storage-test` pasan en Q35 con 1 y 4 vCPU.
 
-**Décimo corte planificado:** sustituir el busy-wait continuo por entrega
-MSI-X, con fallback MSI y después polling, sin cambiar el consumidor único del
-Event Ring. El primer vector será xHCI en el BSP; afinidad, x2APIC y múltiples
-vectores quedan fuera de la baseline. El plan, rollback y pruebas se definen en
+**Décimo corte implementado parcialmente:** sustituir el busy-wait continuo por
+entrega MSI-X/MSI en xHCI, con watchdog y fallback polling, sin cambiar el
+consumidor único del Event Ring. El primer vector será xHCI en el BSP; afinidad,
+x2APIC y múltiples vectores quedan fuera de la baseline. El plan, rollback y pruebas se definen en
 [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md) y
 [`ADR-007`](ADR/ADR-007-pci-interrupt-delivery.md).
 
@@ -385,9 +386,30 @@ capabilities con límites fijos y rechazo fail-closed de punteros inválidos,
 ciclos y truncamientos. Decodifica MSI (32/64 bits y masking) y MSI-X (tamaño,
 BIR y offsets de tabla/PBA), y construye el mensaje físico xAPIC para el rango
 reservado `0x40..=0x4F`. Doce pruebas PCI cubren el walker, decoders, ciclos,
-límites vectoriales y ownership sin duplicados. El siguiente incremento
-implementará la conexión de los writes transaccionales al config space/MMIO y
-el armado MSI-X/MSI desde xHCI, conservando fallback polling.
+límites vectoriales y ownership sin duplicados. El fallback MSI de un mensaje
+ya programa address/data y máscara PVM bajo el mismo ownership; restauración tras
+S3 y validación física siguen siendo gates de release.
+
+**Evidencia Q35:** `make pci-interrupt-test` pasa con 1 y 4 vCPU y una tercera
+ejecución fuerza `msix=off,msi=on`. El kernel lee
+la capability MSI-X real del xHCI, valida la tabla dentro del BAR0, arma la
+entrada 0 con vector `0x40`, habilita `IMAN/USBCMD.INTE` y registra
+`mode=msix`; una tecla USB produce
+`[xhci] deferred interrupt dispatch: events=1, source=irq`. La variante MSI
+registra `mode=msi` y recupera el mismo evento con `source=irq`; el watchdog
+sólo se usa cuando no llega una señal y ejecuta el mismo dispatcher. El
+dispatcher limpia `IMAN.IP` y `USBSTS.EINT` después de avanzar `ERDP`, y el
+bucle de shell usa `enable_and_hlt` con una comprobación atómica del pending
+para no perder una notificación. La ruta de polling sigue activa cuando
+ninguna capability se puede validar.
+
+**Undécimo corte implementado:** el top half PCI conserva su contrato constante
+(pending bit + EOI) y el trabajo diferido reconoce los dos resúmenes W1C de
+xHCI fuera del contexto de interrupción. El shell comprueba el pending con
+interrupciones desactivadas antes de `sti; hlt`; si ya hay trabajo, continúa sin
+dormir. `cargo test -p brane_os_kernel --lib` (187 pruebas), el build bare-metal
+y `cargo fmt --all -- --check` pasan. La validación Q35 de dos notificaciones
+consecutivas y la variante de polling quedan en `make pci-interrupt-test`.
 
 ---
 
@@ -443,11 +465,11 @@ generation conforme a [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) y
 |---------|-------|
 | **Módulos del kernel** | 40 archivos de módulo (excluye `lib.rs`, `main.rs`, `tests.rs`) |
 | **Líneas de código (Rust)** | ~23,000 |
-| **Unit tests** | 178 (incluye USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
+| **Unit tests** | 187 (incluye USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
 | **Syscalls definidas** | 28 (incluye Kill, SigAction, SigReturn, SigProcMask) |
 | **Harnesses de test Python** | 8 (boot + ACPI S3 + 2 security + 2 integration + 2 e2e) |
-| **CI checks** | 14 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, USB HID, USB storage, ACPI S3, security, integration, E2E) |
-| **Make targets de test** | 13 (test, stress-test, iso-test, release-test, boot-test, pcie-test, usb-hid-test, usb-storage-test, smp-test, acpi-test, security-test, integration-test, e2e-test) |
+| **CI checks** | 15 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, PCI interrupts, USB HID, USB storage, ACPI S3, security, integration, E2E) |
+| **Make targets de test** | 14 (test, stress-test, iso-test, release-test, boot-test, pcie-test, pci-interrupt-test, usb-hid-test, usb-storage-test, smp-test, acpi-test, security-test, integration-test, e2e-test) |
 | **Fases completadas** | 11 fases completadas (1–10 y 12); Fase 11 espera gate físico/release |
 
 ---

@@ -1,16 +1,23 @@
 # ADR-007: Entrega de interrupciones PCI y trabajo diferido
 
-**Estado:** Propuesta para el décimo corte de la Fase 13
-**Fecha:** 2026-09-12
+**Estado:** Implementación parcial aceptada para Q35; acknowledgement diferido y polling validados; S3 y hardware físico pendientes
+**Fecha:** 2026-10-10
 **Autores:** Brane OS Team
 
 ## Contexto
 
 Brane OS ya enruta IRQ0/IRQ1 por el I/O APIC, inicia APs en xAPIC y mantiene una
-IDT común, pero los controladores PCI actuales progresan por polling. xHCI
+IDT común. xHCI ya puede usar MSI-X o MSI y conserva watchdog/polling para
+plataformas que no entreguen la señal; virtio-blk continúa por polling. xHCI
 consume su Event Ring durante esperas síncronas y virtio-blk espera el used
 ring. Este modelo permitió validar DMA y ownership antes de introducir entrega
 asíncrona.
+
+El acknowledgement de `IMAN.IP` y `USBSTS.EINT` ocurre en el dispatcher
+diferido, después de avanzar `ERDP`; el wrapper de la IDT sólo publica el
+pending bit y emite EOI. El loop de shell usa una comprobación con IF=0 antes
+de `sti; hlt` para no perder un evento entre el sondeo y el reposo. La
+restauración S3 del xHCI sigue fuera de esta implementación parcial.
 
 La Fase 13 incluye MSI/MSI-X. Activarlas afecta config space, BARs MMIO, reserva
 de vectores, afinidad, orden de inicialización, suspend/resume y locks de los
@@ -130,14 +137,12 @@ migración, destino fuera de ocho bits y sincronización con hotplug de CPU.
 
 ## Plan de transición
 
-1. Implementar y probar el walker de capabilities sin mutar dispositivos.
-2. Reservar el rango IDT y añadir registry/constructores de mensaje xAPIC.
-3. Implementar MSI-X, MSI y rollback con config/MMIO simulados.
-4. Completar primero el dispatcher xHCI por polling según ADR-006.
-5. Conectar xHCI a `0x40` con top half y trabajo diferido.
-6. Añadir watchdog, fallback y pruebas Q35 con 1/4 vCPU.
-7. Integrar reanudación S3 o degradación explícita.
-8. Evaluar virtio-blk como segundo consumidor.
+1. ~~Implementar y probar el walker, registry y constructores xAPIC.~~
+2. ~~Implementar MSI-X, MSI, readback y rollback con config/MMIO simulado.~~
+3. ~~Conectar xHCI a `0x40` con top half, watchdog y trabajo diferido.~~
+4. ~~Validar Q35 con MSI-X y con `msix=off,msi=on`, en 1/4 vCPU.~~
+5. Integrar reanudación S3 o degradación explícita.
+6. Evaluar virtio-blk como segundo consumidor.
 
 ## Evidencia requerida para aceptar la decisión
 
