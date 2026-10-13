@@ -71,6 +71,42 @@ pub enum SyscallNumber {
 }
 
 impl SyscallNumber {
+    /// Every ABI number, in numeric/contract order.
+    ///
+    /// Keeping this list beside the enum makes the metadata table auditable:
+    /// a new syscall cannot be added without also updating the exhaustive
+    /// table and its host-side coverage test.
+    pub const ALL: [Self; 28] = [
+        Self::Exit,
+        Self::Yield,
+        Self::GetPid,
+        Self::Fork,
+        Self::Exec,
+        Self::WaitPid,
+        Self::Mmap,
+        Self::Munmap,
+        Self::Write,
+        Self::Read,
+        Self::Open,
+        Self::Close,
+        Self::Send,
+        Self::Recv,
+        Self::SendRecv,
+        Self::RequestCap,
+        Self::ReleaseCap,
+        Self::CheckCap,
+        Self::GetTime,
+        Self::GetSystemInfo,
+        Self::BraneDiscover,
+        Self::BraneConnect,
+        Self::BraneSend,
+        Self::BraneRecv,
+        Self::Kill,
+        Self::SigAction,
+        Self::SigReturn,
+        Self::SigProcMask,
+    ];
+
     /// Convert a raw u64 to a SyscallNumber, if valid.
     pub fn from_raw(n: u64) -> Option<Self> {
         match n {
@@ -105,6 +141,469 @@ impl SyscallNumber {
             _ => None,
         }
     }
+}
+
+// -----------------------------------------------------------------------
+// Static mediation metadata
+// -----------------------------------------------------------------------
+
+/// Whether a syscall has a complete implementation behind the mediation
+/// boundary.  `Unimplemented` is rejected before a handler or user memory is
+/// touched; it is deliberately not an alias for a permissive default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerState {
+    Implemented,
+    Partial,
+    Unimplemented,
+}
+
+/// Stable audit grouping for the syscall result event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditClass {
+    Process,
+    Memory,
+    Io,
+    Ipc,
+    Capability,
+    System,
+    Brane,
+    Signal,
+}
+
+/// Capability permission named by a syscall policy.
+///
+/// The two process/memory permissions are policy vocabulary for the next
+/// increment. They are intentionally separate from the current wire bitfield
+/// in `security.rs` and do not change the ABI in this cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityPermission {
+    Read,
+    Write,
+    Execute,
+    Grant,
+    Revoke,
+    IpcSend,
+    IpcRecv,
+    BraneConnect,
+    BraneDiscover,
+    BraneSend,
+    BraneRecv,
+    ProcessCreate,
+    ProcessSignal,
+    MemoryMap,
+}
+
+/// Scope to derive from kernel-owned objects when capability checks are wired
+/// into the dispatcher.  A caller never supplies this scope as an argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityScope {
+    System,
+    SelfProcess,
+    TargetProcess,
+    DestinationProcess,
+    VfsService,
+    BraneTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityRequirement {
+    pub permission: CapabilityPermission,
+    pub scope: CapabilityScope,
+}
+
+/// Authorization rule attached to one syscall number.
+///
+/// `Deny` is available for a future reservation, but is not used as an
+/// implicit table fallback. A rule for an unimplemented call still documents
+/// the intended policy; `HandlerState::Unimplemented` makes the current
+/// dispatcher fail closed before that policy can be reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorizationRule {
+    Deny,
+    Public,
+    SelfOnly,
+    SelfOrChild,
+    HandleOwner,
+    Capability(CapabilityRequirement),
+    SelfOrCapability(CapabilityRequirement),
+    SelfOrChildOrCapability(CapabilityRequirement),
+    DualCapability(CapabilityRequirement, CapabilityRequirement),
+}
+
+/// Static policy and memory budget for one ABI number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyscallSpec {
+    pub number: SyscallNumber,
+    pub state: HandlerState,
+    pub authorization: AuthorizationRule,
+    pub audit_class: AuditClass,
+    pub max_copy_bytes: usize,
+}
+
+const MAX_COPY_NONE: usize = 0;
+const MAX_COPY_PATH: usize = 4 * 1024;
+const MAX_COPY_IPC: usize = 4 * 1024;
+const MAX_COPY_BUFFER: usize = 64 * 1024;
+
+const fn cap(permission: CapabilityPermission, scope: CapabilityScope) -> AuthorizationRule {
+    AuthorizationRule::Capability(CapabilityRequirement { permission, scope })
+}
+
+/// Exhaustive metadata table for all 28 reserved ABI numbers.
+///
+/// Do not replace this with a wildcard/default. The table is intentionally
+/// explicit so a missing policy is caught by the unit test and by review.
+pub const SYSCALL_SPECS: [SyscallSpec; 28] = [
+    SyscallSpec {
+        number: SyscallNumber::Exit,
+        state: HandlerState::Partial,
+        authorization: AuthorizationRule::SelfOnly,
+        audit_class: AuditClass::Process,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::Yield,
+        state: HandlerState::Implemented,
+        authorization: AuthorizationRule::SelfOnly,
+        audit_class: AuditClass::Process,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::GetPid,
+        state: HandlerState::Implemented,
+        authorization: AuthorizationRule::SelfOnly,
+        audit_class: AuditClass::Process,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::Fork,
+        state: HandlerState::Unimplemented,
+        authorization: cap(CapabilityPermission::ProcessCreate, CapabilityScope::System),
+        audit_class: AuditClass::Process,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::Exec,
+        state: HandlerState::Unimplemented,
+        authorization: cap(CapabilityPermission::Execute, CapabilityScope::VfsService),
+        audit_class: AuditClass::Process,
+        max_copy_bytes: MAX_COPY_PATH,
+    },
+    SyscallSpec {
+        number: SyscallNumber::WaitPid,
+        state: HandlerState::Unimplemented,
+        authorization: AuthorizationRule::SelfOrChild,
+        audit_class: AuditClass::Process,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::Mmap,
+        state: HandlerState::Unimplemented,
+        authorization: cap(
+            CapabilityPermission::MemoryMap,
+            CapabilityScope::SelfProcess,
+        ),
+        audit_class: AuditClass::Memory,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::Munmap,
+        state: HandlerState::Unimplemented,
+        authorization: cap(
+            CapabilityPermission::MemoryMap,
+            CapabilityScope::SelfProcess,
+        ),
+        audit_class: AuditClass::Memory,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::Write,
+        state: HandlerState::Partial,
+        authorization: cap(CapabilityPermission::Write, CapabilityScope::VfsService),
+        audit_class: AuditClass::Io,
+        max_copy_bytes: MAX_COPY_BUFFER,
+    },
+    SyscallSpec {
+        number: SyscallNumber::Read,
+        state: HandlerState::Unimplemented,
+        authorization: cap(CapabilityPermission::Read, CapabilityScope::VfsService),
+        audit_class: AuditClass::Io,
+        max_copy_bytes: MAX_COPY_BUFFER,
+    },
+    SyscallSpec {
+        number: SyscallNumber::Open,
+        state: HandlerState::Unimplemented,
+        authorization: cap(CapabilityPermission::Read, CapabilityScope::VfsService),
+        audit_class: AuditClass::Io,
+        max_copy_bytes: MAX_COPY_PATH,
+    },
+    SyscallSpec {
+        number: SyscallNumber::Close,
+        state: HandlerState::Unimplemented,
+        authorization: AuthorizationRule::HandleOwner,
+        audit_class: AuditClass::Io,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::Send,
+        state: HandlerState::Partial,
+        authorization: cap(
+            CapabilityPermission::IpcSend,
+            CapabilityScope::DestinationProcess,
+        ),
+        audit_class: AuditClass::Ipc,
+        max_copy_bytes: MAX_COPY_IPC,
+    },
+    SyscallSpec {
+        number: SyscallNumber::Recv,
+        state: HandlerState::Partial,
+        authorization: cap(CapabilityPermission::IpcRecv, CapabilityScope::SelfProcess),
+        audit_class: AuditClass::Ipc,
+        max_copy_bytes: MAX_COPY_IPC,
+    },
+    SyscallSpec {
+        number: SyscallNumber::SendRecv,
+        state: HandlerState::Unimplemented,
+        authorization: AuthorizationRule::DualCapability(
+            CapabilityRequirement {
+                permission: CapabilityPermission::IpcSend,
+                scope: CapabilityScope::DestinationProcess,
+            },
+            CapabilityRequirement {
+                permission: CapabilityPermission::IpcRecv,
+                scope: CapabilityScope::SelfProcess,
+            },
+        ),
+        audit_class: AuditClass::Ipc,
+        max_copy_bytes: MAX_COPY_IPC,
+    },
+    SyscallSpec {
+        number: SyscallNumber::RequestCap,
+        state: HandlerState::Unimplemented,
+        authorization: AuthorizationRule::SelfOnly,
+        audit_class: AuditClass::Capability,
+        max_copy_bytes: MAX_COPY_IPC,
+    },
+    SyscallSpec {
+        number: SyscallNumber::ReleaseCap,
+        state: HandlerState::Unimplemented,
+        authorization: AuthorizationRule::HandleOwner,
+        audit_class: AuditClass::Capability,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CheckCap,
+        state: HandlerState::Unimplemented,
+        authorization: AuthorizationRule::SelfOnly,
+        audit_class: AuditClass::Capability,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::GetTime,
+        state: HandlerState::Implemented,
+        authorization: AuthorizationRule::Public,
+        audit_class: AuditClass::System,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::GetSystemInfo,
+        state: HandlerState::Implemented,
+        authorization: AuthorizationRule::Public,
+        audit_class: AuditClass::System,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::BraneDiscover,
+        state: HandlerState::Unimplemented,
+        authorization: cap(CapabilityPermission::BraneDiscover, CapabilityScope::System),
+        audit_class: AuditClass::Brane,
+        max_copy_bytes: MAX_COPY_BUFFER,
+    },
+    SyscallSpec {
+        number: SyscallNumber::BraneConnect,
+        state: HandlerState::Unimplemented,
+        authorization: cap(
+            CapabilityPermission::BraneConnect,
+            CapabilityScope::BraneTarget,
+        ),
+        audit_class: AuditClass::Brane,
+        max_copy_bytes: MAX_COPY_PATH,
+    },
+    SyscallSpec {
+        number: SyscallNumber::BraneSend,
+        state: HandlerState::Unimplemented,
+        authorization: cap(
+            CapabilityPermission::BraneSend,
+            CapabilityScope::BraneTarget,
+        ),
+        audit_class: AuditClass::Brane,
+        max_copy_bytes: MAX_COPY_BUFFER,
+    },
+    SyscallSpec {
+        number: SyscallNumber::BraneRecv,
+        state: HandlerState::Unimplemented,
+        authorization: cap(
+            CapabilityPermission::BraneRecv,
+            CapabilityScope::BraneTarget,
+        ),
+        audit_class: AuditClass::Brane,
+        max_copy_bytes: MAX_COPY_BUFFER,
+    },
+    SyscallSpec {
+        number: SyscallNumber::Kill,
+        state: HandlerState::Partial,
+        authorization: AuthorizationRule::SelfOrChildOrCapability(CapabilityRequirement {
+            permission: CapabilityPermission::ProcessSignal,
+            scope: CapabilityScope::TargetProcess,
+        }),
+        audit_class: AuditClass::Signal,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::SigAction,
+        state: HandlerState::Partial,
+        authorization: AuthorizationRule::SelfOnly,
+        audit_class: AuditClass::Signal,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::SigReturn,
+        state: HandlerState::Partial,
+        authorization: AuthorizationRule::SelfOnly,
+        audit_class: AuditClass::Signal,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+    SyscallSpec {
+        number: SyscallNumber::SigProcMask,
+        state: HandlerState::Implemented,
+        authorization: AuthorizationRule::SelfOnly,
+        audit_class: AuditClass::Signal,
+        max_copy_bytes: MAX_COPY_NONE,
+    },
+];
+
+/// Look up mediation metadata without a permissive fallback.
+pub fn syscall_spec(number: SyscallNumber) -> Option<&'static SyscallSpec> {
+    SYSCALL_SPECS.iter().find(|spec| spec.number == number)
+}
+
+// -----------------------------------------------------------------------
+// Pure user-range validation
+// -----------------------------------------------------------------------
+
+pub const USER_CANONICAL_BITS: u8 = 48;
+pub const USER_ADDRESS_MAX: u64 = (1u64 << (USER_CANONICAL_BITS - 1)) - 1;
+pub const USER_PAGE_SIZE: u64 = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserAccess {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserRangeError {
+    NullAddress,
+    LengthExceedsMaximum,
+    NonCanonicalStart,
+    NonCanonicalEnd,
+    AddressOverflow,
+    OutsideUserSpace,
+    InvalidUserLimit,
+}
+
+/// A validated user range. This type contains no page-table references: page
+/// presence, `USER_ACCESSIBLE`, and write permission are checked by the later
+/// copy/pin layer. Keeping this constructor pure makes hostile pointer cases
+/// testable on the host without dereferencing the address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserRange {
+    pub start: u64,
+    pub len: usize,
+    pub access: UserAccess,
+}
+
+impl UserRange {
+    /// Validate against the canonical x86-64 low-half user range.
+    pub fn new(
+        start: u64,
+        len: usize,
+        access: UserAccess,
+        max_copy_bytes: usize,
+    ) -> Result<Self, UserRangeError> {
+        Self::new_with_user_limit(start, len, access, max_copy_bytes, USER_ADDRESS_MAX)
+    }
+
+    /// Variant used by an address space with a lower configured user limit.
+    pub fn new_with_user_limit(
+        start: u64,
+        len: usize,
+        access: UserAccess,
+        max_copy_bytes: usize,
+        user_address_max: u64,
+    ) -> Result<Self, UserRangeError> {
+        if user_address_max > USER_ADDRESS_MAX {
+            return Err(UserRangeError::InvalidUserLimit);
+        }
+        if start == 0 && len != 0 {
+            return Err(UserRangeError::NullAddress);
+        }
+        if len > max_copy_bytes {
+            return Err(UserRangeError::LengthExceedsMaximum);
+        }
+        if !is_canonical_user_address(start) {
+            return Err(UserRangeError::NonCanonicalStart);
+        }
+
+        let end = start
+            .checked_add(len as u64)
+            .ok_or(UserRangeError::AddressOverflow)?;
+        if len != 0 {
+            let last = end - 1;
+            if !is_canonical_user_address(last) {
+                return Err(UserRangeError::NonCanonicalEnd);
+            }
+            let user_end = user_address_max
+                .checked_add(1)
+                .ok_or(UserRangeError::InvalidUserLimit)?;
+            if end > user_end {
+                return Err(UserRangeError::OutsideUserSpace);
+            }
+        } else if start > user_address_max {
+            return Err(UserRangeError::OutsideUserSpace);
+        }
+
+        Ok(Self { start, len, access })
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    pub fn end_exclusive(self) -> Result<u64, UserRangeError> {
+        self.start
+            .checked_add(self.len as u64)
+            .ok_or(UserRangeError::AddressOverflow)
+    }
+
+    /// Number of 4 KiB pages touched by the range. Empty ranges touch none.
+    pub fn page_count(self) -> u64 {
+        if self.len == 0 {
+            return 0;
+        }
+        let last = self.start + self.len as u64 - 1;
+        last / USER_PAGE_SIZE - self.start / USER_PAGE_SIZE + 1
+    }
+
+    pub fn crosses_page_boundary(self) -> bool {
+        self.page_count() > 1
+    }
+}
+
+pub fn is_canonical_user_address(address: u64) -> bool {
+    // A valid user address is in the canonical low half. The explicit mask
+    // keeps this helper independent of `x86_64::VirtAddr` and safe on host.
+    address <= USER_ADDRESS_MAX
 }
 
 // -----------------------------------------------------------------------
@@ -187,6 +686,21 @@ pub fn dispatch(ctx: &SyscallContext) -> SyscallResult {
             return SyscallResult::Err(SyscallError::InvalidSyscall);
         }
     };
+
+    // Metadata lookup is a mandatory gate. An absent policy is an internal
+    // error and every reserved-but-unimplemented number fails before a
+    // handler, capability manager, or user-memory path can run.
+    let spec = match syscall_spec(syscall) {
+        Some(spec) => spec,
+        None => {
+            crate::serial_println!("[syscall] {:?} has no mediation metadata", syscall);
+            return SyscallResult::Err(SyscallError::InvalidSyscall);
+        }
+    };
+    if spec.state == HandlerState::Unimplemented {
+        crate::serial_println!("[syscall] {:?} is not implemented", syscall);
+        return SyscallResult::Err(SyscallError::InvalidSyscall);
+    }
 
     crate::serial_println!(
         "[syscall] {:?}(0x{:x}, 0x{:x}, 0x{:x})",

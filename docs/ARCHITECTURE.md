@@ -1088,7 +1088,7 @@ Ver carpeta [`docs/ADR/`](ADR/) para decisiones formales.
 | [ADR-005](ADR/ADR-005-virtual-memory.md) | Memoria virtual y asignación física | ✅ Baseline v0.1 |
 | [ADR-006](ADR/ADR-006-xhci-event-transfer-model.md) | Modelo de eventos y transferencias xHCI | ✅ Baseline v0.1 |
 | [ADR-007](ADR/ADR-007-pci-interrupt-delivery.md) | Entrega MSI/MSI-X y trabajo diferido | 🟡 Implementación parcial Q35 |
-| [ADR-008](ADR/ADR-008-syscall-mediation.md) | Mediación de syscalls y memoria de usuario | 📝 Propuesta Fase 14 |
+| [ADR-008](ADR/ADR-008-syscall-mediation.md) | Mediación de syscalls y memoria de usuario | 🟡 Metadata + `UserRange`; copy y retorno pendientes |
 | [ADR-009](ADR/ADR-009-ipc-endpoints-wait-queues.md) | Endpoints IPC autenticados y wait queues | 📝 Propuesta Fase 14 |
 | [ADR-010](ADR/ADR-010-security-control-plane.md) | Plano de control de seguridad en servicios ring 3 | 📝 Propuesta Fase 14 |
 | [ADR-011](ADR/ADR-011-isolated-ai-runtime.md) | Runtime IA aislado y actuación mediante leases | 📝 Propuesta Fase 14 |

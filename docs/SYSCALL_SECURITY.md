@@ -1,8 +1,8 @@
 # Mediación de syscalls y memoria de usuario — especificación de implementación
 
 > Fase: **14 — prerrequisito de plataforma y servicios aislados**.
-> Estado: **diseño de hardening; implementación pendiente**.
-> Última actualización: **2026-09-12**.
+> Estado: **primer corte implementado; copy y mediación dinámica pendientes**.
+> Última actualización: **2026-10-13**.
 
 ## 1. Objetivo
 
@@ -40,10 +40,17 @@ El código actual ofrece:
 - audit ring volátil de 512 eventos con secuencia y resultado;
 - tabla de 128 procesos enlazada al scheduler por `TaskId`;
 - handlers seleccionados para procesos, I/O, IPC, sistema y señales.
+- `SyscallNumber::ALL` y `SYSCALL_SPECS`, una tabla exhaustiva con estado,
+  autorización prevista, clase de auditoría y presupuesto de copia para los 28
+  números; el dispatcher rechaza cualquier número reservado sin implementación.
+- `UserRange`, un validador puro de rangos user que comprueba null, límites de
+  longitud, overflow, canonicalidad y límite configurable de espacio user, y
+  expone el número de páginas afectadas sin dereferenciar memoria.
 
 Los límites deben permanecer visibles:
 
-- 12 números llegan a un handler; los otros 16 responden `InvalidSyscall`;
+- 12 números llegan a un handler; los otros 16 responden `InvalidSyscall` y
+  ahora pasan por metadata explícita antes de tocar un handler;
 - `exit`, `write`, `ipc_send` e `ipc_recv` todavía tienen semántica parcial o
   stub;
 - `GetPid` devuelve actualmente el `TaskId`, no el `Pid` del proceso;
@@ -354,10 +361,10 @@ un General Protection Fault fatal en ring 0.
 
 ## 12. Incrementos de implementación
 
-1. Añadir `SyscallSpec` exhaustivo y tests de los 28 números.
-2. Capturar `CallerContext`, corregir `GetPid` e incrementar `syscall_count`.
-3. Emitir auditoría terminal sin raw pointers y corregir el orden de locks.
-4. Implementar `UserRange` y validación pura de overflow/canonicalidad.
+1. ~~Añadir `SyscallSpec` exhaustivo y tests de los 28 números.~~ ✅
+2. ~~Implementar `UserRange` y validación pura de overflow/canonicalidad.~~ ✅
+3. Capturar `CallerContext`, corregir `GetPid` e incrementar `syscall_count`.
+4. Emitir auditoría terminal sin raw pointers y corregir el orden de locks.
 5. Añadir page-table walk user, pin/generación y page-fault fixup acotado.
 6. Implementar copy helpers y convertir `Write` en la primera ruta real.
 7. Centralizar capability checks y añadir los permisos requeridos por la matriz.

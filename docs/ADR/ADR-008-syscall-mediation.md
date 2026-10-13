@@ -1,7 +1,7 @@
 # ADR-008: Mediación central de syscalls y acceso a memoria de usuario
 
-**Estado:** Propuesta como prerrequisito de la Fase 14
-**Fecha:** 2026-09-12
+**Estado:** Implementación incremental: metadata y `UserRange` entregados
+**Fecha:** 2026-10-13
 **Autores:** Brane OS Team
 
 ## Contexto
@@ -29,6 +29,11 @@ no pueden desreferenciar enteros proporcionados por ring 3.
 La metadata es exhaustiva para cada `SyscallNumber` y no tiene default
 permisivo. Los números unimplemented fallan antes de copiar memoria o tocar
 recursos. Ningún stub puede simular éxito.
+
+El primer corte implementa esta tabla para los 28 números, el rechazo
+fail-closed de reservas sin handler y un `UserRange` puro que valida límites,
+overflow, canonicalidad, límite user y páginas afectadas. La copia real, la
+mediación dinámica y el retorno seguro siguen siendo gates posteriores.
 
 ### Identidad y scope derivados del kernel
 
@@ -131,10 +136,11 @@ además un evento de inicio correlacionado si luego soportan bloqueo largo.
 
 ## Plan de transición
 
-1. Introducir tabla exhaustiva sin cambiar resultados actuales.
+1. ~~Introducir tabla exhaustiva sin cambiar resultados actuales.~~ ✅
 2. Capturar CallerContext y corregir semántica de `GetPid`.
 3. Añadir evento terminal y retirar logging raw.
-4. Construir `UserRange`, page validation y copy helpers.
+4. ~~Construir `UserRange` y validación pura.~~ ✅ Añadir page-table walk,
+   pin/generación y copy helpers.
 5. Convertir `Write` y después IPC en rutas reales.
 6. Activar reglas de capability de forma incremental, con deny tests primero.
 7. Endurecer señal/retorno y ejecutar pruebas QEMU desde ring 3.
