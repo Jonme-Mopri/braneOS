@@ -407,7 +407,7 @@ ninguna capability se puede validar.
 (pending bit + EOI) y el trabajo diferido reconoce los dos resúmenes W1C de
 xHCI fuera del contexto de interrupción. El shell comprueba el pending con
 interrupciones desactivadas antes de `sti; hlt`; si ya hay trabajo, continúa sin
-dormir. `cargo test -p brane_os_kernel --lib` (189 pruebas), el build bare-metal
+dormir. `cargo test -p brane_os_kernel --lib` (189 pruebas en ese corte), el build bare-metal
 y `cargo fmt --all -- --check` pasan. La validación Q35 de dos notificaciones
 consecutivas y la variante de polling quedan en `make pci-interrupt-test`.
 
@@ -423,6 +423,15 @@ el controlador vuelve a polling y publica `PollingFallback`. El smoke opt-in
 ACPI base mantiene la ruta legacy. El gate físico y la recuperación de
 endpoints HID permanecen abiertos.
 
+**Corte inicial de Fase 14 implementado:** `SyscallNumber::ALL` y
+`SYSCALL_SPECS` cubren de forma exhaustiva los 28 números de la ABI con estado,
+regla de autorización prevista, clase de auditoría y presupuesto de copia. El
+dispatcher rechaza antes del handler cualquier reserva sin implementación.
+`UserRange` valida sin dereferenciar memoria los casos null, longitud máxima,
+overflow, canonicalidad, límite user configurable y páginas atravesadas. Este
+corte no habilita todavía user-copy, capabilities dinámicas, auditoría terminal
+ni procesos ring 3.
+
 ---
 
 ## 🔲 Fase 14 — Plataforma y Ecosistema Brane
@@ -432,7 +441,7 @@ aplicaciones y dispositivos Brane.
 
 | Componente | Estado | Prioridad | Dependencia |
 |-----------|--------|-----------|-------------|
-| Mediación syscall y memoria ring 3 | 🔲 | ALTA | Tabla capability/audit, user-copy y retorno seguro definidos en `SYSCALL_SECURITY.md` |
+| Mediación syscall y memoria ring 3 | 🟡 | ALTA | Metadata exhaustiva y `UserRange` implementados; capability, user-copy, auditoría y retorno seguro siguen en `SYSCALL_SECURITY.md` |
 | IPC autenticado y wait queues | 🔲 | ALTA | Endpoints generacionales, sender kernel y park/notify definidos en `IPC_RUNTIME.md` |
 | Plano de control de seguridad ring 3 | 🔲 | ALTA | Bootstrap audit → identity → policy → broker definido en `SECURITY_SERVICES.md` |
 | Runtime IA aislado | 🔲 | ALTA | `ControlReady`, telemetría tipada, sandbox y leases definidos en `AI_RUNTIME.md` |
@@ -477,7 +486,7 @@ generation conforme a [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) y
 |---------|-------|
 | **Módulos del kernel** | 40 archivos de módulo (excluye `lib.rs`, `main.rs`, `tests.rs`) |
 | **Líneas de código (Rust)** | ~23,000 |
-| **Unit tests** | 189 (incluye USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, registry de vectores, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
+| **Unit tests** | 194 (incluye metadata exhaustiva de syscalls, `UserRange`, USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, registry de vectores, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
 | **Syscalls definidas** | 28 (incluye Kill, SigAction, SigReturn, SigProcMask) |
 | **Harnesses de test Python** | 8 (boot + ACPI S3 + 2 security + 2 integration + 2 e2e) |
 | **CI checks** | 15 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, PCI interrupts, USB HID, USB storage, ACPI S3, security, integration, E2E) |

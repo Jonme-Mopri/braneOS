@@ -1,6 +1,6 @@
 # Documentación de Brane OS
 
-> Estado documental: **activo**. Última revisión transversal: **2026-10-10**.
+> Estado documental: **activo**. Última revisión transversal: **2026-10-13**.
 
 Este directorio reúne la visión, el diseño vigente, la evidencia operativa y
 los planes de evolución de Brane OS. La documentación distingue explícitamente
@@ -12,6 +12,7 @@ una descripción de diseño no implica por sí sola que exista código ejecutabl
 | Área | Estado verificable | Siguiente límite |
 |------|--------------------|------------------|
 | Kernel base, memoria, IPC y shell | ✅ Operativo en QEMU | Mediar syscalls y memoria ring 3 |
+| Metadata de syscalls y rangos user | 🟡 Primer corte implementado en host | User-copy, capabilities, auditoría y retorno seguro |
 | IPC entre procesos | 🟡 Colas kernel probadas en host | Endpoints, sender autenticado y wait queues |
 | Seguridad y auditoría | 🟡 Baseline en kernel | Cuatro servicios raíz y bootstrap fail-closed |
 | IA | 🟡 ObserveOnly sintético en kernel | Runtime/modelo aislados y telemetría real |
@@ -22,8 +23,9 @@ una descripción de diseño no implica por sí sola que exista código ejecutabl
 | Interrupciones PCI | 🟡 MSI-X/MSI xHCI validado en QEMU | Rearmado PCI tras S3 y validación física |
 | Release | 🟡 Artefactos y automatización listos | Matriz física y tag v1.0 |
 
-El foco de implementación vigente es la **Fase 13**: completar el rearmado PCI
-y la validación física después del gate S3 de xHCI. El dispatcher ya está
+El foco de implementación vigente combina el cierre de la **Fase 13**:
+completar el rearmado PCI y la validación física después del gate S3 de xHCI.
+El dispatcher ya está
 validado con HID y Mass Storage en MSI-X, con fallback MSI y polling; el
 acknowledgement W1C, la protección contra lost wakeups y la cuarentena
 fail-closed de rings no retenidos están cubiertos en Q35. El estado detallado y los criterios de salida se mantienen en

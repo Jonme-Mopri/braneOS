@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §18.  
 > Estado: **Activo**.  
-> Última actualización: **2026-10-10**
+> Última actualización: **2026-10-13**
 
 ---
 
@@ -41,6 +41,10 @@ Brane OS utiliza una estrategia de testing multinivel que cubre desde unidades a
   CDB SCSI y endian, inquiry/sense/capacity, rango y fragmentación de lectura.
   Un transporte BOT simulado verifica phase error, CSW inválido, orden de Reset
   Recovery y cuarentena tras timeout sin emitir un segundo CBW.
+- Frontera syscall: cobertura exhaustiva de metadata para los 28 números y
+  rechazo fail-closed de números reservados sin implementación.
+- `UserRange`: null, cero, overflow, límite user configurable, canonicalidad y
+  cálculo de páginas afectadas sin dereferenciar memoria.
 
 **Herramientas:** `cargo test`, test modules en Rust (`#[cfg(test)]`).
 
@@ -183,7 +187,7 @@ GitHub Actions valida en cada `push` y `pull_request` hacia `main`:
 | Formatting | Activo | `cargo fmt --all -- --check` |
 | Clippy | Activo | Kernel bare-metal + runner host con `-D warnings` |
 | Kernel unit tests | Activo | `cargo test -p brane_os_kernel --lib` |
-| **Storage/USB host** | **Activo** | xHCI USB/HID/Bulk, BOT/SCSI y recovery negativo, MCFG/ECAM, PCI, block, DMA, virtqueue y FAT32 (189 tests totales) |
+| **Storage/USB host** | **Activo** | xHCI USB/HID/Bulk, BOT/SCSI y recovery negativo, MCFG/ECAM, PCI, block, DMA, virtqueue, FAT32 y syscall boundary (194 tests totales) |
 | **Stress y mutation-fuzz** | **Activo** | `make stress-test` (parsers, allocator, IPC y dispatcher SMP concurrente) |
 | **Release artifact (ISO UEFI)** | **Activo** | `make iso-test VERSION=ci` (ISO, checksum y boot con OVMF) |
 | **Boot test (QEMU)** | **Activo** | Kernel release + FAT32 virtio legacy read-only; exige LBA0, montaje `/disk` y lectura VFS real |
@@ -252,8 +256,9 @@ La validación local equivalente recomendada está documentada en
     `resume_pending_s3` valida rings y degrada a polling o quarantine). El
     smoke Q35 es opt-in; la retención de endpoints HID y el rearmado PCI físico
     siguen pendientes.
-21. Fase 14: metadata exhaustiva de syscalls, user-copy, mediación por
-    capability, auditoría terminal y retorno ring 3 seguro; especificación en
+21. Fase 14: metadata exhaustiva de syscalls y validación pura de `UserRange`.
+    ✅ Primer corte implementado (194 tests); quedan user-copy, mediación por
+    capability, auditoría terminal y retorno ring 3 seguro según
     [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md).
 22. Fase 14: endpoints IPC generacionales, sender autenticado, Send/Recv reales
     y wait cells sin lost wakeup en SMP; especificación en

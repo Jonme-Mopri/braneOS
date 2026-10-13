@@ -197,7 +197,10 @@ mod scheduler_tests {
 
 #[cfg(test)]
 mod syscall_tests {
-    use crate::syscall::{SyscallError, SyscallNumber, SyscallResult};
+    use crate::syscall::{
+        dispatch, syscall_spec, SyscallContext, SyscallError, SyscallNumber, SyscallResult,
+        UserAccess, UserRange, UserRangeError, USER_ADDRESS_MAX,
+    };
 
     #[test]
     fn syscall_number_from_valid_raw() {
@@ -222,6 +225,103 @@ mod syscall_tests {
 
         let err = SyscallResult::Err(SyscallError::PermissionDenied);
         assert_eq!(err.to_raw(), -3);
+    }
+
+    #[test]
+    fn syscall_metadata_covers_every_abi_number_once() {
+        assert_eq!(
+            crate::syscall::SYSCALL_SPECS.len(),
+            SyscallNumber::ALL.len()
+        );
+
+        for (index, number) in SyscallNumber::ALL.iter().enumerate() {
+            let spec = syscall_spec(*number).expect("every ABI number has metadata");
+            assert_eq!(spec.number, *number);
+            assert_eq!(crate::syscall::SYSCALL_SPECS[index].number, *number);
+            assert_eq!(SyscallNumber::from_raw(*number as u64), Some(*number));
+        }
+
+        for (index, left) in crate::syscall::SYSCALL_SPECS.iter().enumerate() {
+            assert!(!crate::syscall::SYSCALL_SPECS[index + 1..]
+                .iter()
+                .any(|right| right.number == left.number));
+        }
+    }
+
+    #[test]
+    fn unimplemented_syscall_is_rejected_before_dispatch() {
+        let result = dispatch(&SyscallContext {
+            number: SyscallNumber::Mmap as u64,
+            arg1: 0xdead_beef,
+            arg2: usize::MAX as u64,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        });
+        assert!(matches!(
+            result,
+            SyscallResult::Err(SyscallError::InvalidSyscall)
+        ));
+    }
+
+    #[test]
+    fn user_range_accepts_empty_null_and_tracks_pages() {
+        let empty = UserRange::new(0, 0, UserAccess::Read, 0).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.end_exclusive().unwrap(), 0);
+        assert_eq!(empty.page_count(), 0);
+        assert!(!empty.crosses_page_boundary());
+
+        let one_page = UserRange::new(0x4000, 4096, UserAccess::Write, 4096).unwrap();
+        assert_eq!(one_page.end_exclusive().unwrap(), 0x5000);
+        assert_eq!(one_page.page_count(), 1);
+        assert!(!one_page.crosses_page_boundary());
+
+        let two_pages = UserRange::new(0x4fff, 2, UserAccess::Read, 2).unwrap();
+        assert_eq!(two_pages.page_count(), 2);
+        assert!(two_pages.crosses_page_boundary());
+    }
+
+    #[test]
+    fn user_range_rejects_hostile_bounds() {
+        assert_eq!(
+            UserRange::new(0, 1, UserAccess::Read, 1),
+            Err(UserRangeError::NullAddress)
+        );
+        assert_eq!(
+            UserRange::new(0x1000, 65, UserAccess::Read, 64),
+            Err(UserRangeError::LengthExceedsMaximum)
+        );
+        assert_eq!(
+            UserRange::new(u64::MAX - 1, 4, UserAccess::Read, 4),
+            Err(UserRangeError::NonCanonicalStart)
+        );
+        assert_eq!(
+            UserRange::new(USER_ADDRESS_MAX, 2, UserAccess::Read, 2),
+            Err(UserRangeError::NonCanonicalEnd)
+        );
+        assert_eq!(
+            UserRange::new_with_user_limit(0x1fff, 2, UserAccess::Read, 2, 0x1fff),
+            Err(UserRangeError::OutsideUserSpace)
+        );
+    }
+
+    #[test]
+    fn user_range_rejects_invalid_user_limit_and_overflow() {
+        assert_eq!(
+            UserRange::new_with_user_limit(0x1000, 1, UserAccess::Read, 1, USER_ADDRESS_MAX + 1),
+            Err(UserRangeError::InvalidUserLimit)
+        );
+        assert_eq!(
+            UserRange::new_with_user_limit(
+                USER_ADDRESS_MAX,
+                usize::MAX,
+                UserAccess::Read,
+                usize::MAX,
+                USER_ADDRESS_MAX,
+            ),
+            Err(UserRangeError::AddressOverflow)
+        );
     }
 }
 

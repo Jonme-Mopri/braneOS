@@ -7,6 +7,11 @@ All notable changes to Brane OS are documented here. The project follows
 
 ### Added
 
+- First Phase 14 syscall mediation cut: exhaustive metadata for all 28 ABI
+  numbers, fail-closed rejection of reserved unimplemented calls, and a pure
+  `UserRange` validator for null, length, overflow, canonicality, user limits
+  and page-boundary accounting. Copy helpers, dynamic capability checks and
+  ring-3 return validation remain subsequent gates.
 - xHCI ACPI S3 gate with fail-closed quiesce, ring/register retention
   validation, polling fallback and quarantine when firmware resets state;
   `make acpi-xhci-test` provides an opt-in Q35 smoke path.
