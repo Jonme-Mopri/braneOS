@@ -139,33 +139,70 @@ def send_text_explicit(qmp: QmpClient, text: str, deadline: float) -> None:
         time.sleep(0.03)
 
 
-def run_test(image: Path, timeout: int) -> int:
+def qemu_xhci_support() -> bool | None:
+    """Return whether this QEMU exposes its emulated qemu-xhci device.
+
+    The xHCI S3 smoke test is deliberately opt-in.  A QEMU build without the
+    device model must therefore skip that optional case rather than making
+    the baseline ACPI test depend on a host controller or a particular QEMU
+    package layout.  ``None`` means that QEMU itself could not be executed.
+    """
+    try:
+        result = subprocess.run(
+            [QEMU_BIN, "-device", "help"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    return any('"qemu-xhci"' in line for line in result.stdout.splitlines())
+
+
+def run_test(image: Path, timeout: int, xhci: bool = False) -> int:
+    if xhci:
+        support = qemu_xhci_support()
+        if support is None:
+            failed(f"{QEMU_BIN} could not be executed")
+            return 2
+        if not support:
+            info("SKIP: this QEMU has no qemu-xhci device; ACPI baseline remains valid")
+            return 0
+
     deadline = time.monotonic() + timeout
     shell_ready = threading.Event()
     resumed = threading.Event()
     acpi_status = threading.Event()
     scheduler_resumed = threading.Event()
+    xhci_resume = threading.Event()
+    xhci_results: list[str] = []
     failures: list[str] = []
 
     with tempfile.TemporaryDirectory(prefix="brane-acpi-") as temp_dir:
         qmp_path = Path(temp_dir) / "qmp.sock"
-        command = [
-            QEMU_BIN,
-            "-m",
-            "256M",
-            "-drive",
-            f"format=raw,file={image}",
-            "-serial",
-            "stdio",
-            "-nographic",
-            "-monitor",
-            "none",
-            "-qmp",
-            f"unix:{qmp_path},server=on,wait=off",
-            "-no-reboot",
-            "-accel",
-            "tcg",
-        ]
+        command = [QEMU_BIN, "-m", "256M"]
+        if xhci:
+            # Keep the controller unconnected: this exercises the PCI/xHCI
+            # bootstrap and ACPI resume path without requiring a physical USB
+            # device or introducing a second input source into the harness.
+            command.extend(["-machine", "q35", "-device", "qemu-xhci,id=branexhci"])
+        command.extend(
+            [
+                "-drive",
+                f"format=raw,file={image}",
+                "-serial",
+                "stdio",
+                "-nographic",
+                "-monitor",
+                "none",
+                "-qmp",
+                f"unix:{qmp_path},server=on,wait=off",
+                "-no-reboot",
+                "-accel",
+                "tcg",
+            ]
+        )
         info(f"Launching QEMU (timeout={timeout}s)")
         proc = subprocess.Popen(
             command,
@@ -189,6 +226,9 @@ def run_test(image: Path, timeout: int) -> int:
                     acpi_status.set()
                 if "[sched] Resumed." in line:
                     scheduler_resumed.set()
+                if "[xhci] S3 resume result:" in line:
+                    xhci_results.append(line.rsplit(":", 1)[-1].strip())
+                    xhci_resume.set()
                 for marker in FAIL_STRINGS:
                     if marker in line:
                         failures.append(marker)
@@ -229,6 +269,12 @@ def run_test(image: Path, timeout: int) -> int:
             if failures:
                 raise RuntimeError(f"kernel failure after wake: {failures[0]}")
             passed("Kernel restored platform state after S3")
+            if xhci:
+                if not xhci_resume.wait(max(0, deadline - time.monotonic())):
+                    raise TimeoutError("xHCI S3 resume gate did not publish a result")
+                if xhci_results[-1] not in {"Retained", "PollingFallback", "Quarantined"}:
+                    raise RuntimeError(f"unexpected xHCI S3 result: {xhci_results[-1]}")
+                passed("Optional xHCI S3 smoke completed without requiring post-resume USB hardware")
 
             if not shell_ready.wait(max(0, deadline - time.monotonic())):
                 raise TimeoutError("shell prompt did not return after resume")
@@ -262,11 +308,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--img", type=Path, required=True)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument(
+        "--xhci",
+        action="store_true",
+        help="opt-in Q35/xHCI S3 smoke; skips when QEMU lacks qemu-xhci",
+    )
     args = parser.parse_args()
     if not args.img.exists():
         failed(f"disk image not found: {args.img}")
         return 2
-    return run_test(args.img.resolve(), args.timeout)
+    return run_test(args.img.resolve(), args.timeout, args.xhci)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Documentación de Brane OS
 
-> Estado documental: **activo**. Última revisión transversal: **2026-09-15**.
+> Estado documental: **activo**. Última revisión transversal: **2026-10-10**.
 
 Este directorio reúne la visión, el diseño vigente, la evidencia operativa y
 los planes de evolución de Brane OS. La documentación distingue explícitamente
@@ -18,13 +18,15 @@ una descripción de diseño no implica por sí sola que exista código ejecutabl
 | Paquetes | 🔲 Diseño `bpkg` | Storage durable, trust root y trusted time |
 | SMP/APIC | ✅ 4 vCPU en QEMU/TCG | Validación física |
 | Almacenamiento | ✅ virtio-blk y USB BOT/SCSI + FAT32 read-only | Escritura persistente |
-| USB/xHCI | ✅ HID y Mass Storage operativos en Q35 | MSI/MSI-X, múltiples slots y hotplug |
-| Interrupciones PCI | 🔲 Diseño MSI/MSI-X | Implementar primero sobre xHCI |
+| USB/xHCI | ✅ HID y Mass Storage operativos en Q35 | Gate S3 fail-closed; múltiples slots y hotplug |
+| Interrupciones PCI | 🟡 MSI-X/MSI xHCI validado en QEMU | Rearmado PCI tras S3 y validación física |
 | Release | 🟡 Artefactos y automatización listos | Matriz física y tag v1.0 |
 
-El foco de implementación vigente es la **Fase 13**: migrar el dispatcher xHCI
-ya validado con HID y Mass Storage desde polling a MSI-X, con fallback MSI y
-polling. El estado detallado y los criterios de salida se mantienen en
+El foco de implementación vigente es la **Fase 13**: completar el rearmado PCI
+y la validación física después del gate S3 de xHCI. El dispatcher ya está
+validado con HID y Mass Storage en MSI-X, con fallback MSI y polling; el
+acknowledgement W1C, la protección contra lost wakeups y la cuarentena
+fail-closed de rings no retenidos están cubiertos en Q35. El estado detallado y los criterios de salida se mantienen en
 [`ROADMAP.md`](ROADMAP.md).
 
 ## Ruta de lectura

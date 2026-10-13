@@ -286,7 +286,7 @@ pub trait InterruptController {
 | 32 | Timer | PIT/APIC timer tick |
 | 33 | Keyboard | Interrupciones de teclado |
 | `0x22..=0x3F` | Hardware legacy | Reserva para IRQs adicionales |
-| `0x40..=0x4F` | PCI | Rango planeado para MSI/MSI-X |
+| `0x40..=0x4F` | PCI | Rango reservado para MSI/MSI-X |
 | `0x80` | Syscall legacy | Reservado; la baseline usa `syscall`/`sysret` |
 | `0xF0` | SMP | Sonda IPI dirigida a los APs |
 | `0xFF` | LAPIC | Vector spurious |
@@ -737,7 +737,7 @@ pub trait Driver: Send + Sync {
 | Disk (virtio-blk) | ✅ Legacy | Polling PCI | Virtqueue por polling y DMA bajo 4 GiB |
 | Disk (USB) | ✅ BOT/SCSI read-only | Polling | LUN 0, `usb-storage0` y FAT32 en `/usb` |
 | Network (virtio-net) | ✅ Base integrada | PCI | Discovery compartido + transporte legacy I/O |
-| USB/xHCI | ✅ HID + Mass Storage | Polling; MSI diseñado | EP0, interrupt IN y Bulk IN/OUT sobre dispatcher único; un slot activo |
+| USB/xHCI | ✅ HID + Mass Storage | MSI-X/MSI + watchdog; polling fallback | EP0, interrupt IN y Bulk IN/OUT sobre dispatcher único; un slot activo |
 | Bluetooth | 🔲 Futuro | — | Para mobile companion |
 
 ### 7.3 Inventario PCI
@@ -765,19 +765,19 @@ errores. Las apertures MMIO verificadas se instalan en una ventana virtual
 acotada con páginas `NO_CACHE`/`NO_EXECUTE`, reutilizando duplicados exactos y
 rechazando aliases solapados.
 
-#### 7.3.1 Interrupciones PCI objetivo
+#### 7.3.1 Interrupciones PCI
 
-El siguiente corte posterior a USB funcional añadirá un walker acotado de
-capabilities convencionales y un registry fijo para los vectores
-`0x40..=0x4F`. MSI-X con una entrada será la ruta preferida; MSI con un mensaje
-y el polling actual serán fallbacks obligatorios. La primera entrega se dirige
-al BSP en modo xAPIC y despierta al dispatcher xHCI sin consumir el Event Ring
-dentro del handler.
+El walker acotado de capabilities convencionales y el registry fijo para los
+vectores `0x40..=0x4F` ya están conectados al xHCI. MSI-X con una entrada es la
+ruta preferida; MSI con un mensaje y el polling actual son fallbacks. La
+entrega se dirige al BSP en modo xAPIC y despierta al dispatcher xHCI sin
+consumir el Event Ring dentro del handler.
 
-Config space y tablas MSI-X se programarán enmascarados y con rollback antes de
-publicar una ruta como armada. BIR y offsets se validarán contra BARs medidos;
+Config space y tablas MSI-X se programan enmascarados y con rollback antes de
+publicar una ruta como armada. BIR y offsets se validan contra BARs medidos;
 los top halves no tomarán locks de PCI config, block, VFS, TTY o USB. El diseño,
-la secuencia S3 y los criterios Q35 se mantienen en
+la secuencia S3 —incluido el gate fail-closed que valida rings y degrada a
+polling/quarantine— y los criterios Q35 se mantienen en
 [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md); el ownership queda registrado en
 [`ADR-007`](ADR/ADR-007-pci-interrupt-delivery.md).
 
@@ -826,8 +826,18 @@ como incrementos posteriores.
 capability header, offsets operacionales/runtime/doorbell y tamaño de página.
 La inicialización espera `CNR=0`, garantiza `HCHalted`, ejecuta `HCRST` con
 timeout y reserva estructuras físicamente contiguas: scratchpads opcionales,
-DCBAA, Command Ring cíclico, Event Ring y ERST. El controlador opera inicialmente
-por polling, sin habilitar MSI/MSI-X.
+DCBAA, Command Ring cíclico, Event Ring y ERST. El controlador arma MSI-X o
+MSI después de publicar el Event Ring, habilita `IMAN/USBCMD.INTE` y conserva
+polling como fallback. El top half sólo marca el vector pendiente;
+`service_interrupt_once` consume eventos fuera del frame y un watchdog acotado
+recupera una notificación que no llegue.
+
+Antes de ACPI S3, `prepare_for_s3` rechaza una transferencia HID o command
+completion activa, enmascara IMAN/USBCMD y espera `Halted`. Después de restaurar
+LAPIC/PIC, `resume_pending_s3` compara CRCR, DCBAAP, CONFIG, ERSTBA y ERDP con
+las regiones DMA originales. Un mismatch detiene DMA y deja el controlador en
+quarantine; si los rings sobreviven pero la ruta MSI/MSI-X no se puede rearmar,
+el estado pasa explícitamente a polling.
 
 Una sonda `No Op Command` comprueba en Q35 que el controlador consume el TRB
 publicado mediante su doorbell, produce un `Command Completion Event` exitoso
@@ -852,10 +862,11 @@ codificar `0x81`, recibe un Transfer Ring y un buffer DMA persistentes y se
 habilita mediante `Configure Endpoint`. Sólo existe un reporte pendiente; cada
 completion válida copia ocho bytes, rearma el endpoint y libera el lock xHCI
 antes de decodificar nuevas pulsaciones US o entrar en la TTY. El loop de
-`brsh` llama al polling una vez después de cada `hlt`, por lo que no mantiene un
-busy-wait continuo. `make usb-hid-test` demuestra la ruta QMP → `usb-kbd` →
-xHCI → TTY con 1 y 4 vCPU. Hubs, ratón, hotplug y MSI/MSI-X siguen fuera de la
-baseline; la especificación y evidencia están en [`USB_XHCI.md`](USB_XHCI.md).
+`brsh` llama al dispatcher una vez después de cada `hlt`, por lo que no mantiene
+un busy-wait continuo. `make usb-hid-test` demuestra la ruta QMP → `usb-kbd` →
+xHCI → TTY con 1 y 4 vCPU. Hubs, ratón, hotplug y resume de la ruta IRQ siguen
+fuera de la baseline; la especificación y evidencia están en
+[`USB_XHCI.md`](USB_XHCI.md).
 
 ### 7.7 USB Mass Storage
 
@@ -1076,7 +1087,7 @@ Ver carpeta [`docs/ADR/`](ADR/) para decisiones formales.
 | [ADR-004](ADR/ADR-004-ipc-message-passing.md) | IPC por message passing acotado | ✅ Baseline v0.1 |
 | [ADR-005](ADR/ADR-005-virtual-memory.md) | Memoria virtual y asignación física | ✅ Baseline v0.1 |
 | [ADR-006](ADR/ADR-006-xhci-event-transfer-model.md) | Modelo de eventos y transferencias xHCI | ✅ Baseline v0.1 |
-| [ADR-007](ADR/ADR-007-pci-interrupt-delivery.md) | Entrega MSI/MSI-X y trabajo diferido | 📝 Propuesta Fase 13 |
+| [ADR-007](ADR/ADR-007-pci-interrupt-delivery.md) | Entrega MSI/MSI-X y trabajo diferido | 🟡 Implementación parcial Q35 |
 | [ADR-008](ADR/ADR-008-syscall-mediation.md) | Mediación de syscalls y memoria de usuario | 📝 Propuesta Fase 14 |
 | [ADR-009](ADR/ADR-009-ipc-endpoints-wait-queues.md) | Endpoints IPC autenticados y wait queues | 📝 Propuesta Fase 14 |
 | [ADR-010](ADR/ADR-010-security-control-plane.md) | Plano de control de seguridad en servicios ring 3 | 📝 Propuesta Fase 14 |

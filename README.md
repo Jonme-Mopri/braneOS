@@ -23,8 +23,9 @@ The logo represents interconnected membranes forming a single adaptive system. B
 Current milestone: virtio-blk and read-only FAT32 are operational; xHCI drives
 either a USB boot keyboard or a USB Mass Storage BOT/SCSI disk. Q35 validates
 HID input and a distinct read-only FAT32 volume mounted at `/usb`, both with 1
-and 4 vCPUs. MSI/MSI-X is the next implementation cut. Physical hardware
-validation and the v1.0 tag are still release gates.
+and 4 vCPUs. xHCI now arms MSI-X and has a real MSI fallback, with a bounded
+watchdog when the fallback platform does not deliver an interrupt. Physical
+hardware validation and the v1.0 tag are still release gates.
 
 ---
 

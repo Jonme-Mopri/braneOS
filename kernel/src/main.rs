@@ -1006,8 +1006,18 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // Shell loop: wait for keyboard input, process commands
     loop {
-        x86_64::instructions::hlt(); // Wait for interrupt
+        xhci::service_interrupt_once();
         xhci::poll_hid_once();
+
+        // Close the check-to-sleep race: once IF is cleared, a pending xHCI
+        // vector prevents sleeping; otherwise `sti; hlt` atomically enables
+        // delivery and waits for the next interrupt.
+        x86_64::instructions::interrupts::disable();
+        if pci::interrupt_pending(pci::PCI_VECTOR_FIRST) {
+            x86_64::instructions::interrupts::enable();
+        } else {
+            x86_64::instructions::interrupts::enable_and_hlt();
+        }
 
         // Check if a line is ready
         let mut tty_guard = tty::TTY.lock();
@@ -1068,6 +1078,16 @@ fn resume_platform() {
         pic::init();
     }
     let network_ready = net::init();
+    if let Some(result) = xhci::resume_pending_s3() {
+        serial_println!("[xhci] S3 resume result: {:?}", result);
+        tty::tty_println(match result {
+            xhci::XhciS3Resume::Retained => "xHCI resumed with retained rings.",
+            xhci::XhciS3Resume::PollingFallback => "xHCI resumed through the polling fallback.",
+            xhci::XhciS3Resume::Quarantined => {
+                "xHCI state was not retained; controller quarantined."
+            }
+        });
+    }
     serial_println!(
         "[acpi] Resume complete; interrupts restored, keyboard={}, network={}",
         keyboard_ready,

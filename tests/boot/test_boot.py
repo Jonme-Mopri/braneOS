@@ -12,6 +12,7 @@ Exit codes:
 
 Usage:
   python3 tests/boot/test_boot.py [--timeout SECONDS] [--no-build]
+  python3 tests/boot/test_boot.py --machine q35 --usb-hid --pci-interrupt
 
 Environment variables:
   KERNEL_BIN_PATH  — path to pre-built kernel binary (skips cargo build)
@@ -366,6 +367,9 @@ def run_qemu_test(
     machine: str | None = None,
     usb_hid: bool = False,
     usb_storage: bool = False,
+    pci_interrupt: bool = False,
+    disable_msix: bool = False,
+    disable_msi: bool = False,
 ) -> int:
     """
     Launch QEMU with the given disk image or ISO, capture serial output,
@@ -405,10 +409,26 @@ def run_qemu_test(
                 "[xhci] Device descriptor: vid=0x0627, pid=0x0001",
                 "[xhci] HID keyboard ready: slot=1, interface=0, endpoint=0x81",
             ])
+        if pci_interrupt:
+            irq_mode = "polling" if disable_msix and disable_msi else ("msi" if disable_msix else "msix")
+            required_strings.append(f"[pci-irq] xhci0: mode={irq_mode}" + (" vector=0x40" if irq_mode != "polling" else " (MSI-X/MSI unavailable)"))
+            if irq_mode != "polling":
+                required_strings.extend([
+                    "[xhci] deferred interrupt dispatch: events=",
+                    # Keep this exact source check: watchdog/polling output is
+                    # deliberately not accepted as an interrupt dispatch.
+                    "[xhci] deferred interrupt dispatch: events=1, source=irq",
+                ])
+        elif disable_msix and disable_msi:
+            required_strings.append("[pci-irq] xhci0: mode=polling (MSI-X/MSI unavailable)")
     if usb_hid:
-        required_strings.append(
-            "[xhci] HID report received: slot=1, endpoint=0x81, len=8, key=u"
-        )
+        # Exercise two independent HID reports.  In interrupt scenarios the
+        # dispatch marker is checked after each injection below, so a stale
+        # pending Event Ring line cannot satisfy the test.
+        required_strings.extend([
+            "[xhci] HID report received: slot=1, endpoint=0x81, len=8, key=u",
+            "[xhci] HID report received: slot=1, endpoint=0x81, len=8, key=v",
+        ])
     if cpus > 1:
         required_strings.extend([
             f"[smp] CPU boot plan ready: {cpus} enabled CPU(s)",
@@ -452,7 +472,16 @@ def run_qemu_test(
         "-device", "virtio-blk-pci,drive=braneblk,disable-modern=on",
     ])
     if machine == "q35":
-        cmd.extend(["-device", "qemu-xhci,id=branexhci"])
+        xhci_device = "qemu-xhci,id=branexhci"
+        if disable_msix:
+            xhci_device += ",msix=off"
+        if disable_msi:
+            xhci_device += ",msi=off"
+        elif disable_msix:
+            # Make MSI fallback explicit rather than relying on QEMU's
+            # auto policy (and keep the scenario deterministic in CI).
+            xhci_device += ",msi=on"
+        cmd.extend(["-device", xhci_device])
         if usb_storage:
             with tempfile.NamedTemporaryFile(
                 prefix="brane-usb-storage-", suffix=".img", delete=False
@@ -491,6 +520,10 @@ def run_qemu_test(
     output_lines: list[str] = []
     done_event = threading.Event()
     shell_ready = threading.Event()
+    injections_done = threading.Event()
+    state_lock = threading.Lock()
+    hid_counts = {"u": 0, "v": 0}
+    irq_dispatches = 0
 
     try:
         proc = subprocess.Popen(
@@ -519,11 +552,22 @@ def run_qemu_test(
         max_pattern_len = max(len(s) for s in required_strings + FAIL_STRINGS)
 
         def emit_partial_line() -> None:
+            nonlocal irq_dispatches
             if not line_chars:
                 return
             line = "".join(line_chars).rstrip("\r\n")
             output_lines.append(line)
             print(f"  serial │ {line}", flush=True)
+            # Count complete report/IRQ lines once.  The injector snapshots
+            # these counters before each key and waits for a new line after
+            # that injection, catching an unacknowledged pending interrupt.
+            with state_lock:
+                for key in ("u", "v"):
+                    marker = f"[xhci] HID report received: slot=1, endpoint=0x81, len=8, key={key}"
+                    if marker in line:
+                        hid_counts[key] += 1
+                if "[xhci] deferred interrupt dispatch: events=1, source=irq" in line:
+                    irq_dispatches += 1
             line_chars.clear()
 
         try:
@@ -552,7 +596,7 @@ def run_qemu_test(
                     return
 
                 # Detect the shell prompt immediately even though it has no newline.
-                if found == set(required_strings) and not failed_reason:
+                if found == set(required_strings) and not failed_reason and (not usb_hid or injections_done.is_set()):
                     emit_partial_line()
                     done_event.set()
                     return
@@ -567,6 +611,7 @@ def run_qemu_test(
 
     def inject_usb_key() -> None:
         if not usb_hid or qmp_path is None:
+            injections_done.set()
             return
         deadline = time.monotonic() + timeout
         client = None
@@ -574,12 +619,40 @@ def run_qemu_test(
             if not shell_ready.wait(timeout=max(0.1, deadline - time.monotonic())):
                 raise TimeoutError("shell prompt did not appear before USB HID injection")
             client = QmpClient(qmp_path, deadline)
-            client.execute(
-                "human-monitor-command",
-                {"command-line": "sendkey u"},
-                deadline=deadline,
-            )
-            info("Injected key 'u' through QMP; awaiting the xHCI HID marker.")
+            for key in ("u", "v"):
+                with state_lock:
+                    before_report = hid_counts[key]
+                    before_irq = irq_dispatches
+                client.execute(
+                    "human-monitor-command",
+                    {"command-line": f"sendkey {key}"},
+                    deadline=deadline,
+                )
+                info(f"Injected key '{key}' through QMP; awaiting the xHCI HID marker.")
+                while time.monotonic() < deadline:
+                    with state_lock:
+                        report_seen = hid_counts[key] > before_report
+                        irq_seen = irq_dispatches > before_irq
+                    # For --pci-interrupt this exact source=irq evidence is
+                    # mandatory; polling/watchdog lines never count.
+                    if report_seen and (not pci_interrupt or irq_seen):
+                        break
+                    time.sleep(0.02)
+                else:
+                    evidence = "HID report" if not pci_interrupt else "HID report plus source=irq dispatch"
+                    raise TimeoutError(f"no post-injection {evidence} for key {key!r}")
+            injections_done.set()
+            # The serial reader may be blocked waiting for another byte after
+            # the final marker. Complete the test explicitly once both HID
+            # reports and all required boot markers have been observed.
+            with state_lock:
+                missing = set(required_strings) - found
+            if missing:
+                failed_reason.append(
+                    "required markers missing after HID injection: "
+                    + ", ".join(sorted(missing))
+                )
+            done_event.set()
         except Exception as exc:
             failed_reason.append(f"USB HID key injection failed: {exc}")
             done_event.set()
@@ -651,6 +724,12 @@ def parse_args() -> argparse.Namespace:
                    help="Inject a key over QMP and require the xHCI HID/TTY path")
     p.add_argument("--usb-storage", action="store_true",
                    help="Attach a read-only USB BOT/SCSI FAT32 disk and require /usb")
+    p.add_argument("--pci-interrupt", action="store_true",
+                   help="Require xHCI MSI-X/MSI setup and deferred source=irq Event Ring dispatch")
+    p.add_argument("--disable-msix", action="store_true",
+                   help="Disable the QEMU xHCI MSI-X capability to exercise MSI fallback")
+    p.add_argument("--disable-msi", action="store_true",
+                   help="Disable the QEMU xHCI MSI capability (combine with --disable-msix for polling)")
     media = p.add_mutually_exclusive_group()
     media.add_argument("--img", type=str, default=None,
                        help="Path to existing .img file, skips build entirely")
@@ -670,6 +749,18 @@ def main() -> None:
         sys.exit(2)
     if args.usb_storage and args.machine != "q35":
         error("--usb-storage requires --machine q35")
+        sys.exit(2)
+    if args.pci_interrupt and args.machine != "q35":
+        error("--pci-interrupt requires --machine q35")
+        sys.exit(2)
+    if args.disable_msix and args.machine != "q35":
+        error("--disable-msix requires --machine q35")
+        sys.exit(2)
+    if args.disable_msi and args.machine != "q35":
+        error("--disable-msi requires --machine q35")
+        sys.exit(2)
+    if args.pci_interrupt and args.disable_msix and args.disable_msi:
+        error("--pci-interrupt requires MSI-X or MSI; both disabled selects polling")
         sys.exit(2)
     if args.usb_hid and args.usb_storage:
         error("--usb-hid and --usb-storage are mutually exclusive until xHCI supports multiple slots")
@@ -706,6 +797,9 @@ def main() -> None:
         args.machine,
         args.usb_hid,
         args.usb_storage,
+        args.pci_interrupt,
+        args.disable_msix,
+        args.disable_msi,
     )
 
     elapsed = time.monotonic() - start

@@ -7,6 +7,11 @@ All notable changes to Brane OS are documented here. The project follows
 
 ### Added
 
+- xHCI ACPI S3 gate with fail-closed quiesce, ring/register retention
+  validation, polling fallback and quarantine when firmware resets state;
+  `make acpi-xhci-test` provides an opt-in Q35 smoke path.
+- Two deterministic PCI vector-registry tests covering invalid ownership
+  transitions and metadata preservation across mask/rearm.
 - Documentation portal, reconciled current-vs-target status, and ADRs for Brane
   Protocol v2, the syscall ABI, IPC message passing and virtual memory.
 - Phase 13 implementation specification for xHCI control transfers, USB
@@ -69,6 +74,37 @@ All notable changes to Brane OS are documented here. The project follows
   endpoint dequeue synchronization. Host-side negative tests cover phase
   errors, invalid CSW identity and timeout quarantine without issuing a second
   CBW after failed recovery.
+- PCI conventional capability walker with fail-closed bounds, cycle and
+  truncation checks; MSI/MSI-X decoders; and validated xAPIC MSI message
+  construction for the reserved Phase 13 vector range.
+- Fixed PCI vector ownership registry with duplicate prevention, validated
+  state transitions, and failed-setup release semantics.
+- Transactional host models for MSI and MSI-X programming, including one-message
+  MSI setup, masked MSI-X entry writes, measured-BAR bounds checks, and
+  no-mutation failure behavior.
+- IDT wrappers for the complete PCI vector range with release/acquire pending
+  bits and a constant-time top half that defers device work.
+- Deferred xHCI Event Ring service after `hlt`, bounded by the existing runtime
+  event budget and followed by the normal HID completion/rearm path.
+- Real Q35 MSI-X setup for xHCI: capability discovery from ECAM, BAR0 table
+  bounds validation, masked entry-0 programming, vector `0x40`, interrupter
+-  enable, and polling fallback. A dedicated 1/4-vCPU QMP test proves deferred
+  HID completion delivery.
+- Checked MSI-X/MSI programming transactions: measured BAR and PBA validation,
+  readback after every config/MMIO write, rollback that retains vector ownership
+  on failure, APIC EOI without taking the runtime lock, and xHCI MSI fallback.
+  Q35 covers MSI-X IRQ delivery at 1/4 vCPU and `msix=off,msi=on` delivery with
+  the bounded watchdog.
+- Deferred xHCI interrupt acknowledgement now clears `IMAN.IP` and
+  `USBSTS.EINT` after advancing `ERDP`, with a bounded second pass for events
+  arriving during acknowledgement. The shell closes the pending-to-`hlt` race
+  by checking the vector while interrupts are disabled before `sti; hlt`.
+- Q35 PCI interrupt coverage now injects two distinct HID reports and checks a
+  fresh `source=irq` dispatch for each MSI-X/MSI event; disabling both
+  capabilities verifies the polling fallback. `make test-all` includes this
+  interrupt matrix.
+- The deterministic parser corpus now exercises the PCI capability walker and
+  MSI/MSI-X decoders alongside the existing USB and filesystem parsers.
 
 ## 0.1.0 — Foundation
 
@@ -85,8 +121,9 @@ All notable changes to Brane OS are documented here. The project follows
 
 - Live migration of a context that has already run remains disabled; tasks may
   be balanced before dispatch or pinned by affinity.
-- MSI/MSI-X, hotplug, hubs, mice, simultaneous USB slots and modern virtio PCI
-  transport remain planned for Phase 13; xHCI currently supports either one
-  HID boot keyboard or one BOT/SCSI Mass Storage device through bounded polling.
+- MSI-X/MSI is implemented for xHCI; virtio PCI remains on polling. Hotplug,
+  hubs, mice, simultaneous USB slots, IRQ resume after S3 and modern virtio PCI
+  transport remain outside the Phase 13 baseline. xHCI supports either one HID
+  boot keyboard or one BOT/SCSI Mass Storage device.
 - FAT32 is read-only and supports 8.3 names; LFN and write operations remain
   unimplemented.

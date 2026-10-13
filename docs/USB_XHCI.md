@@ -2,7 +2,7 @@
 
 > Fase: **13 — Hardware I/O y almacenamiento**.
 > Estado: **octavo corte implementado y validado en QEMU/Q35**.
-> Última actualización: **2026-09-15**.
+> Última actualización: **2026-10-10**.
 
 ## 1. Objetivo
 
@@ -53,7 +53,12 @@ La prueba `make pcie-test` conecta `qemu-xhci` y `usb-kbd`, y exige:
 - Se aceptan teclados HID boot; no se interpreta un Report Descriptor genérico.
 - Los cambios de puerto se registran y un disconnect detiene el rearme, pero no
   existen teardown, reclaim DMA ni hotplug completo.
-- El controlador opera por polling; MSI/MSI-X sigue fuera de este corte.
+- El controlador prefiere MSI-X y cae a MSI o polling; Q35 valida MSI-X y MSI
+  por IRQ, además de la variante con ambos mecanismos deshabilitados que
+  conserva la ruta de polling. El watchdog queda como recuperación acotada.
+- El gate ACPI S3 detiene xHCI sólo sin transferencias activas, valida la
+  retención de rings al volver y publica `PollingFallback` o `Quarantined`;
+  el rearmado PCI y la recuperación de un endpoint HID pendiente quedan fuera.
 
 ## 3. Alcance y exclusiones
 
@@ -71,9 +76,9 @@ La prueba `make pcie-test` conecta `qemu-xhci` y `usb-kbd`, y exige:
 - Mouse, hubs, interfaces compuestas arbitrarias y múltiples teclados.
 - Parser genérico del HID Report Descriptor.
 - SuperSpeed HID, streams, isochronous y USB power management.
-- MSI/MSI-X (corte posterior en
-  [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md)), hotplug, suspend/resume USB y
-  cancelación avanzada.
+- Múltiples interrupters, hotplug, cancelación avanzada y rearmado PCI completo
+  después de S3. El gate de retención vigente está descrito en
+  [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
 - USB mass storage; reutilizará el transfer engine en un corte posterior.
 
 ## 4. Estructuras nuevas

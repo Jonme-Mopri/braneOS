@@ -1,8 +1,8 @@
 # Interrupciones PCI MSI/MSI-X — especificación de implementación
 
 > Fase: **13 — Hardware I/O y almacenamiento**.
-> Estado: **diseño del décimo corte; implementación pendiente**.
-> Última actualización: **2026-09-12**.
+> Estado: **MSI-X xHCI y fallback MSI implementados; Q35 valida IRQ y polling**.
+> Última actualización: **2026-10-10**.
 
 ## 1. Objetivo
 
@@ -217,9 +217,9 @@ programa cuándo invocarlo:
 6. Armar la ruta PCI y ejecutar un No Op que produzca un evento.
 7. Exigir que el handler despierte al dispatcher y que éste complete el comando.
 
-El top half xHCI confirma `IMAN.IP`, limpia el pending del interrupter de acuerdo
-con su semántica W1C, marca trabajo y emite EOI. No avanza ERDP. El dispatcher
-diferido consume todos los Event TRB disponibles hasta su presupuesto, actualiza
+El top half xHCI marca trabajo y emite EOI. El dispatcher diferido confirma
+`IMAN.IP` y `USBSTS.EINT` de acuerdo con su semántica W1C después de avanzar
+ERDP; no toma locks de protocolo en el handler. El dispatcher consume todos los Event TRB disponibles hasta su presupuesto, actualiza
 ERDP y conserva completions para Command, EP0, HID, Bulk y cambios de puerto.
 
 `IMOD=0` simplifica la primera prueba. Moderación, varios Interrupters y afinidad
@@ -231,18 +231,28 @@ volver al busy-wait continuo.
 
 ## 11. Suspend, resume y degradación
 
+La ruta S3 ya tiene un gate explícito alrededor de `acpi::suspend_s3()`. El
+driver sólo detiene xHCI cuando no hay command/transfer pendiente; un endpoint
+HID armado hace que la suspensión se rechace con `Busy`, porque cancelar ese
+endpoint requiere la recuperación de rings que este corte todavía no promete.
+El snapshot conserva `CRCR`, `DCBAAP`, `CONFIG`, `ERSTBA` y `ERDP`, además del
+modo de interrupción.
+
 Antes de S3, el kernel enmascara la fuente del dispositivo y la capability PCI,
 después drena trabajo ya publicado. Al reanudar:
 
 1. restaura primero LAPIC/IDT y confirma modo xAPIC;
-2. valida que el BDF y la capability sigan presentes;
-3. restaura el estado del controlador y sus rings;
-4. reprograma address/data MSI o la entrada MSI-X;
-5. limpia estados pendientes antes de desenmascarar;
-6. reactiva la ruta y ejecuta una sonda acotada.
+2. valida `USBSTS`, los punteros de rings, `CONFIG` y la geometría DMA;
+3. restaura los registros retenidos sólo después de pasar esas validaciones;
+4. mantiene MSI/MSI-X enmascarado y reanuda por polling cuando la ruta PCI
+   anterior no puede probarse de nuevo;
+5. limpia estados pendientes, arranca el controlador y deja el dispatcher
+   como único consumidor del Event Ring.
 
-Si la reprogramación o la sonda falla, el driver vuelve a polling y registra el
-motivo. No conserva `Armed` una ruta cuyo destino APIC ya no sea válido.
+Si la validación o el arranque fallan, el driver detiene DMA y publica
+`Quarantined`; no etiqueta como polling un estado de rings que no pudo validar.
+El resume válido desde MSI/MSI-X publica `PollingFallback` y limpia el vector
+pendiente. La reanudación desde polling conserva `Retained`.
 
 ## 12. Incrementos de implementación
 
@@ -253,9 +263,36 @@ motivo. No conserva `Armed` una ruta cuyo destino APIC ya no sea válido.
 5. Implementar fallback MSI de un mensaje y después polling.
 6. Convertir xHCI a flag + dispatcher diferido sin cambiar ADR-006.
 7. Añadir sonda Q35 por interrupción y watchdog de recuperación.
-8. Restaurar la ruta después de S3 o demostrar fallback controlado.
+8. Restaurar la ruta después de S3 o demostrar fallback controlado. ✅ Gate de
+   retención implementado; el rearmado PCI queda para un corte posterior.
 9. Evaluar virtio-blk como segundo consumidor sin habilitar multi-queue.
 10. Registrar evidencia física y decidir si se acepta ADR-007 para v0.1.
+
+### Estado de implementación
+
+El walker, los decoders y el registry fijo están implementados en
+`kernel/src/pci.rs`. El camino bare-metal valida la capability contra el
+inventario de BARs medidos, mantiene MSI/MSI-X deshabilitado y la entrada
+enmascarada mientras publica address/data, y reserva el vector antes de
+anunciar `Armed`. Los accesos ECAM/CF8/CFC de la transacción se serializan; MSI
+preserva MMC y los bits no relacionados, y MSI-X valida la tabla completa y la
+PBA dentro de apertures de memoria. El EOI del LAPIC usa una dirección atómica
+prepublicada para que el wrapper de IDT no tome el lock del runtime.
+
+La IDT instala wrappers para todo `0x40..=0x4F`. Cada top half sólo marca un
+bit pendiente con `Release` y emite EOI; `take_interrupt_pending` lo retira con
+`Acquire`, dejando el consumo del Event Ring fuera del contexto de interrupción.
+El bucle de la shell llama a `xhci::service_interrupt_once()` antes y después
+del reposo; con interrupciones desactivadas comprueba el pending antes de
+`enable_and_hlt`. La rutina drena hasta `RUNTIME_EVENT_BUDGET`, reencola el vector si el
+presupuesto se agota y deja que `poll_hid_once()` procese la completion y rearme
+el endpoint. En Q35, tanto MSI-X como MSI producen `source=irq`; el watchdog
+queda como recuperación cuando una plataforma no entrega la señal.
+Antes de `acpi::suspend_s3()`, `xhci::prepare_for_s3()` enmascara IMAN, detiene
+`USBCMD`, espera `Halted` y conserva un token de generación. Tras restaurar
+LAPIC/PIC, `resume_pending_s3()` valida los punteros publicados; en QEMU donde
+el firmware resetea esos registros, el resultado observado es
+`Quarantined` y el controlador queda detenido.
 
 ## 13. Estrategia de pruebas
 
@@ -281,12 +318,13 @@ debe exigir marcadores inequívocos:
 
 ```text
 [pci-irq] xhci0: mode=msix|msi vector=0x40 destination=...
-[xhci] Interrupt probe: vector=0x40 handled=1 dispatched=1 completion=success
-[pci-irq] polling watchdog: lost=0
+[xhci] deferred interrupt dispatch: events=1, source=irq|watchdog
 ```
 
 La sonda debe completarse sin que la ruta de espera gire millones de veces. El
-test se repite con 1 y 4 vCPU, y mantiene virtio-blk/FAT32, USB HID, USB storage
+test se repite con 1 y 4 vCPU, fuerza además `msix=off,msi=on` para el fallback
+MSI y ejecuta una variante con ambos mecanismos deshabilitados para polling;
+mantiene virtio-blk/FAT32, USB HID, USB storage
 y boot sin USB como regresiones según estén disponibles.
 
 Una variante debe ocultar o invalidar de forma simulada MSI-X para demostrar
@@ -302,6 +340,8 @@ degradar el boot.
 - Evento xHCI que llega entre limpiar el flag y preparar `hlt`.
 - S3 con capability que cambia o desaparece.
 - Fallo al rearmar seguido de polling funcional.
+- S3 con una transferencia HID o command completion todavía pendiente: el gate
+  debe devolver `Busy` sin tocar MMIO.
 
 ## 14. Criterio de salida
 

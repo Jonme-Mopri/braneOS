@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §18.  
 > Estado: **Activo**.  
-> Última actualización: **2026-09-15**
+> Última actualización: **2026-10-10**
 
 ---
 
@@ -183,18 +183,20 @@ GitHub Actions valida en cada `push` y `pull_request` hacia `main`:
 | Formatting | Activo | `cargo fmt --all -- --check` |
 | Clippy | Activo | Kernel bare-metal + runner host con `-D warnings` |
 | Kernel unit tests | Activo | `cargo test -p brane_os_kernel --lib` |
-| **Storage/USB host** | **Activo** | xHCI USB/HID/Bulk, BOT/SCSI y recovery negativo, MCFG/ECAM, PCI, block, DMA, virtqueue y FAT32 (178 tests totales) |
+| **Storage/USB host** | **Activo** | xHCI USB/HID/Bulk, BOT/SCSI y recovery negativo, MCFG/ECAM, PCI, block, DMA, virtqueue y FAT32 (189 tests totales) |
 | **Stress y mutation-fuzz** | **Activo** | `make stress-test` (parsers, allocator, IPC y dispatcher SMP concurrente) |
 | **Release artifact (ISO UEFI)** | **Activo** | `make iso-test VERSION=ci` (ISO, checksum y boot con OVMF) |
 | **Boot test (QEMU)** | **Activo** | Kernel release + FAT32 virtio legacy read-only; exige LBA0, montaje `/disk` y lectura VFS real |
 | **PCIe ECAM test (Q35)** | **Activo** | `make pcie-test` exige MCFG/ECAM, virtio-blk/FAT32 y enumeración/configuración del `usb-kbd` por xHCI |
 | **USB HID test (Q35/QMP)** | **Activo** | `make usb-hid-test` inyecta `u`, exige Transfer Event propio y entrega TTY con 1 y 4 vCPU |
+| **PCI interrupt test (Q35/QMP)** | **Activo** | `make pci-interrupt-test` valida MSI-X y MSI por IRQ, acknowledgement W1C, dos eventos consecutivos y fallback polling |
 | **USB storage test (Q35)** | **Activo** | `make usb-storage-test` descubre BOT/SCSI LUN 0, registra `usb-storage0`, monta FAT32 en `/usb` y conserva `/disk` con 1 y 4 vCPU |
 | **SMP/AP startup test (QEMU)** | **Activo** | `make smp-test` (4 vCPU, INIT/SIPI, estado per-CPU, 8 rondas acotadas y workers reales en CPU1–CPU3) |
 | **SMP run-queue + dispatcher model (host)** | **Activo** | `cargo test -p brane_os_kernel --lib sched::multicore_tests` (balanceo, steal, ownership y retorno al idle entre quanta) |
 | **SMP per-CPU timer state (host)** | **Activo** | `cargo test -p brane_os_kernel --lib cpu_local_scheduler_tracks_timer_without_touching_bsp` (slot, ticks y aislamiento del cursor BSP) |
 | **SMP dispatcher stress (host)** | **Activo** | `cargo test -p brane_os_kernel --lib stress_multicore_dispatch_preserves_task_ownership` (4 workers, 2.000 rondas, ownership y stealing) |
 | **ACPI S3 test (QEMU/QMP)** | **Activo** | `make acpi-test` (suspend, wake, shell y restauración del contexto BSP tras `yield`) |
+| **ACPI S3 xHCI smoke (Q35/QMP)** | **Opt-in** | `make acpi-xhci-test` arranca un `qemu-xhci` sin USB, ejecuta S3 y acepta `PollingFallback` o `Quarantined` según la retención de registros; no sustituye la prueba HID física |
 | **ACPI MADT/APIC/SMP** | **Activo** | `cargo test -p brane_os_kernel --lib madt` y `cargo test -p brane_os_kernel --lib smp` + boot BIOS (xAPIC/x2APIC, overrides, MMIO, IRQ routing, BSP y fallback PIC) |
 | **Security tests (QEMU)** | **Activo** | `make security-test` (capability denial + privilege escalation) |
 | **Integration tests (QEMU)** | **Activo** | `make integration-test` (syscall/service + capability broker) |
@@ -240,22 +242,29 @@ La validación local equivalente recomendada está documentada en
 18. ~~Fase 13: USB Mass Storage Bulk-Only, perfil SCSI read-only, registro como
     `BlockDevice` y montaje FAT32.~~ ✅ **Completado** (178 tests/fuzz + recovery
     negativo + `usb-storage0` → `/usb` en Q35 con 1/4 vCPU, conservando `/disk`)
-19. Fase 13: capability walker PCI, MSI-X con fallback MSI/polling y dispatcher
-    xHCI diferido; diseño y criterio de salida en
-    [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
-20. Fase 14: metadata exhaustiva de syscalls, user-copy, mediación por
+19. ~~Fase 13: capability walker PCI, MSI-X/MSI y dispatcher xHCI diferido.~~ ✅
+    **Completado parcialmente** (`make pci-interrupt-test` pasa con 1/4 vCPU y
+    una ejecución `msix=off,msi=on`; Q35 arma vector `0x40`, reconoce `IMAN.IP`
+    y `USBSTS.EINT`, y valida dos completions HID por IRQ). El gate S3 y la
+    validación física siguen en el incremento siguiente.
+20. ~~Fase 13: gate xHCI alrededor de ACPI S3.~~ ✅ **Completado parcialmente**
+    (`prepare_for_s3` enmascara y detiene xHCI con un gate fail-closed;
+    `resume_pending_s3` valida rings y degrada a polling o quarantine). El
+    smoke Q35 es opt-in; la retención de endpoints HID y el rearmado PCI físico
+    siguen pendientes.
+21. Fase 14: metadata exhaustiva de syscalls, user-copy, mediación por
     capability, auditoría terminal y retorno ring 3 seguro; especificación en
     [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md).
-21. Fase 14: endpoints IPC generacionales, sender autenticado, Send/Recv reales
+22. Fase 14: endpoints IPC generacionales, sender autenticado, Send/Recv reales
     y wait cells sin lost wakeup en SMP; especificación en
     [`IPC_RUNTIME.md`](IPC_RUNTIME.md).
-22. Fase 14: cuatro servicios de seguridad ring 3, bootstrap sin ciclos, commit
+23. Fase 14: cuatro servicios de seguridad ring 3, bootstrap sin ciclos, commit
     exclusivo del broker, auditoría con gaps y reinicio fail-closed;
     especificación en [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md).
-23. Fase 14: orchestrator/model IA en procesos separados, telemetría tipada,
+24. Fase 14: orchestrator/model IA en procesos separados, telemetría tipada,
     budgets, provenance y primera acción con lease single-use; especificación en
     [`AI_RUNTIME.md`](AI_RUNTIME.md).
-24. Fase 14: parser `.bpkg`, cadena de metadata, resolver, store inmutable y
+25. Fase 14: parser `.bpkg`, cadena de metadata, resolver, store inmutable y
     crash recovery de generations; especificación en
     [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md).
 
@@ -270,11 +279,13 @@ La validación local equivalente recomendada está documentada en
 | `make test-image` | Compila una imagen compartida con el kernel release |
 | `make boot-test` | Boot test del kernel release en QEMU/TCG (60 s) |
 | `make pcie-test` | Boot Q35; valida ACPI MCFG, PCIe ECAM y storage real |
+| `make pci-interrupt-test` | Q35/QMP con 1/4 vCPU + fallback MSI; valida xHCI vector 0x40 y dispatcher diferido |
 | `make usb-hid-test` | Q35/QMP con 1/4 vCPU; valida descriptor, endpoint interrupt IN y TTY |
 | `make smp-test` | Boot con 4 vCPU, hand-off real y ejecución verificada en cada AP |
 | `make acpi-test` | S3, shell post-resume y `yield` aislado del BSP en QEMU/QMP (120 s) |
+| `make acpi-xhci-test` | Smoke opt-in Q35 con xHCI sin dispositivo USB; gate S3 y resultado de retención/quarantine |
 | `make security-test` | Security tests en QEMU |
 | `make integration-test` | Integration tests en QEMU |
 | `make e2e-test` | E2E tests en QEMU |
-| `make test-all` | Suite completa (unit → stress/fuzz → boot/PCIe/USB → SMP → ACPI → security → integration → e2e) |
+| `make test-all` | Suite completa (unit → stress/fuzz → boot/PCIe/interrupts/USB → SMP → ACPI → security → integration → e2e) |
 | `make docs` | Genera API docs con `cargo doc` |
