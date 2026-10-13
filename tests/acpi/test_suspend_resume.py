@@ -279,13 +279,27 @@ def run_test(image: Path, timeout: int, xhci: bool = False) -> int:
             if not shell_ready.wait(max(0, deadline - time.monotonic())):
                 raise TimeoutError("shell prompt did not return after resume")
             shell_ready.clear()
+            # QEMU may publish the prompt before its post-wake input path is
+            # ready. Give the guest a short settling window before injecting
+            # the first command.
+            time.sleep(0.1)
             send_text_explicit(qmp, "acpi\n", deadline)
+            if not acpi_status.wait(min(5, max(0, deadline - time.monotonic()))):
+                # Older QEMU builds can accept HMP sendkey after S3 while
+                # rejecting input-send-event. Retry through the compatible
+                # path before treating the guest as unresponsive.
+                info("post-resume input-send-event produced no command; retrying HMP sendkey")
+                send_text(qmp, "acpi\n", deadline)
             if not acpi_status.wait(max(0, deadline - time.monotonic())):
                 raise TimeoutError("shell did not execute a command after resume")
             passed("brsh accepted a command after resume")
 
             shell_ready.clear()
+            time.sleep(0.1)
             send_text_explicit(qmp, "yield\n", deadline)
+            if not scheduler_resumed.wait(min(5, max(0, deadline - time.monotonic()))):
+                info("post-resume input-send-event produced no yield; retrying HMP sendkey")
+                send_text(qmp, "yield\n", deadline)
             if not scheduler_resumed.wait(max(0, deadline - time.monotonic())):
                 raise TimeoutError("BSP did not resume its CPU-local context after yield")
             passed("BSP restored its isolated scheduler context after yield")

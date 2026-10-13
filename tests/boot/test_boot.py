@@ -71,6 +71,7 @@ FAIL_STRINGS = [
 ]
 
 QEMU_BIN = os.environ.get("QEMU_BIN", "qemu-system-x86_64")
+_QEMU_XHCI_PROPERTIES: set[str] | None = None
 
 
 def find_ovmf() -> tuple[Path, Path] | None:
@@ -144,6 +145,33 @@ def warn(msg: str) -> None:
 
 def error(msg: str) -> None:
     print(f"[boot-test] \033[31mFAIL\033[0m  {msg}", flush=True)
+
+
+def qemu_xhci_supports_property(name: str) -> bool:
+    """Return whether this QEMU exposes an xHCI device property.
+
+    QEMU versions differ in whether the xHCI MSI toggle is available. Keep the
+    fallback and polling scenarios deterministic when it exists, while letting
+    older CI images skip only the scenario they cannot configure.
+    """
+    global _QEMU_XHCI_PROPERTIES
+    if _QEMU_XHCI_PROPERTIES is None:
+        try:
+            probe = subprocess.run(
+                [QEMU_BIN, "-device", "qemu-xhci,help"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            _QEMU_XHCI_PROPERTIES = set()
+        else:
+            _QEMU_XHCI_PROPERTIES = set(
+                match.group(1)
+                for match in re.finditer(r"^\s+([a-z0-9-]+)=", probe.stdout, re.MULTILINE)
+            )
+    return name in _QEMU_XHCI_PROPERTIES
 
 
 class QmpClient:
@@ -375,6 +403,14 @@ def run_qemu_test(
     Launch QEMU with the given disk image or ISO, capture serial output,
     and return 0 (pass), 1 (fail).
     """
+    msi_property = True
+    if machine == "q35" and (disable_msix or disable_msi):
+        msi_property = qemu_xhci_supports_property("msi")
+    if machine == "q35" and disable_msi and not msi_property:
+        info("SKIP: this QEMU xHCI has no msi toggle; polling cannot be configured")
+        return 0
+    if machine == "q35" and disable_msix and not disable_msi and not msi_property:
+        info("QEMU xHCI has no msi=on toggle; using its default MSI fallback")
     cmd = [QEMU_BIN, "-m", "256M", "-smp", str(cpus)]
     if machine:
         cmd.extend(["-machine", machine])
@@ -477,7 +513,7 @@ def run_qemu_test(
             xhci_device += ",msix=off"
         if disable_msi:
             xhci_device += ",msi=off"
-        elif disable_msix:
+        elif disable_msix and msi_property:
             # Make MSI fallback explicit rather than relying on QEMU's
             # auto policy (and keep the scenario deterministic in CI).
             xhci_device += ",msi=on"
