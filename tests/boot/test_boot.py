@@ -404,8 +404,13 @@ def run_qemu_test(
     and return 0 (pass), 1 (fail).
     """
     msi_property = True
+    msix_property = True
     if machine == "q35" and (disable_msix or disable_msi):
         msi_property = qemu_xhci_supports_property("msi")
+        msix_property = qemu_xhci_supports_property("msix")
+    if machine == "q35" and disable_msix and not msix_property:
+        info("SKIP: this QEMU xHCI has no msix toggle; fallback/polling cannot be configured")
+        return 0
     if machine == "q35" and disable_msi and not msi_property:
         info("SKIP: this QEMU xHCI has no msi toggle; polling cannot be configured")
         return 0
