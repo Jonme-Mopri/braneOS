@@ -221,7 +221,7 @@ impl AiEngine {
             AiAction::AlertUser => {
                 crate::serial_println!("[ai]   ACTION: Alerting user");
                 self.total_actions_executed += 1;
-                audit::AUDIT.lock().record(
+                audit::record(
                     0,
                     audit::AuditAction::AiActionAuthorized(0),
                     self.actuation_cap,
@@ -232,7 +232,7 @@ impl AiEngine {
             _ => {
                 crate::serial_println!("[ai]   ACTION DENIED: {:?} (restricted)", action);
                 self.total_actions_denied += 1;
-                audit::AUDIT.lock().record(
+                audit::record(
                     0,
                     audit::AuditAction::AiActionDenied(0),
                     self.actuation_cap,

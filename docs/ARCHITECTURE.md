@@ -578,7 +578,9 @@ Puntos de inserción transversal para registrar eventos auditables.
 pub struct AuditEvent {
     pub seq: u64,
     pub tick: u64,
-    pub source: TaskId,
+    pub source: Option<TaskId>,
+    pub pid: Option<Pid>,
+    pub cpu_id: u16,
     pub action: AuditAction,
     pub capability_used: Option<CapabilityId>,
     pub result: AuditResult,
@@ -586,6 +588,7 @@ pub struct AuditEvent {
 
 pub enum AuditAction {
     SyscallInvoked(u64),
+    SyscallCompleted { number: u64, class: Option<AuditClass> },
     CapabilityChecked(CapabilityId),
     CapabilityGranted(CapabilityId),
     CapabilityRevoked(CapabilityId),

@@ -7,13 +7,13 @@ bridges user-space requests to kernel services by inspecting serial output.
 
 Validates the chain:
   syscall_write  → serial output recorded
-  syscall_getpid → scheduler task ID returned
+  syscall_getpid → kernel-derived process ID returned
   syscall_yield  → scheduler tick counter incremented
   syscall_gettime → tick value returned
   syscall_getsysinfo → active task count returned
 
 These are integration-level checks: the boot sequence actually exercises
-the syscall dispatcher at startup (Phase 3 of kernel_main).
+the syscall dispatcher after installing trusted process mappings during boot.
 
 Exit codes:
   0 — PASS
@@ -26,6 +26,7 @@ Usage:
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -46,7 +47,7 @@ DEFAULT_TIMEOUT = int(os.environ.get("BOOT_TIMEOUT", "90"))
 # Required evidence in serial output that syscall dispatch is working
 REQUIRED_STRINGS = [
     "Brane OS",
-    # Phase 3 — syscall dispatcher test in kernel_main
+    # Dispatcher test after process mappings have been installed
     "[sys]  Syscall dispatcher ready. Test GetPid =>",
     # Phase 3 — IPC (which uses syscall path)
     "[ipc]  IPC core ready",
@@ -207,9 +208,9 @@ def run_integration_test(img_path: Path, timeout: int) -> int:
     # --- Detailed analysis ---
     full_output = "\n".join(output_lines)
 
-    # Verify GetPid returned a valid task ID
+    # Verify GetPid returned a kernel-derived process ID
     if getpid_value is not None:
-        ok(f"GetPid syscall returned task_id={getpid_value} (valid scheduler ID)")
+        ok(f"GetPid syscall returned pid={getpid_value} (kernel-derived process ID)")
     else:
         warn("Could not parse GetPid return value from serial output")
 
@@ -226,14 +227,14 @@ def run_integration_test(img_path: Path, timeout: int) -> int:
         ok("Scheduler active (yield integration confirmed via unit tests)")
 
     # Verify IPC over syscall path
-    if "Task 0 has 1 pending message" in full_output:
+    if re.search(r"Task \d+ has 1 pending message", full_output):
         ok("IPC send/recv integration verified via boot sequence")
 
     ok("Syscall → service integration test PASSED ✓")
     info("Additional coverage via unit tests:")
     info("  integration_syscall_tests::syscall_dispatch_write_returns_len")
     info("  integration_syscall_tests::syscall_yield_triggers_scheduler_tick")
-    info("  integration_syscall_tests::getpid_returns_current_task")
+    info("  integration_syscall_tests::getpid_returns_kernel_derived_pid")
     return 0
 
 # ---------------------------------------------------------------------------

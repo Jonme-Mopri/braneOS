@@ -1,8 +1,8 @@
 # Mediación de syscalls y memoria de usuario — especificación de implementación
 
 > Fase: **14 — prerrequisito de plataforma y servicios aislados**.
-> Estado: **primer corte implementado; copy y mediación dinámica pendientes**.
-> Última actualización: **2026-10-13**.
+> Estado: **segundo corte implementado; copy y mediación dinámica pendientes**.
+> Última actualización: **2026-10-14**.
 
 ## 1. Objetivo
 
@@ -53,9 +53,13 @@ Los límites deben permanecer visibles:
   ahora pasan por metadata explícita antes de tocar un handler;
 - `exit`, `write`, `ipc_send` e `ipc_recv` todavía tienen semántica parcial o
   stub;
-- `GetPid` devuelve actualmente el `TaskId`, no el `Pid` del proceso;
+- `GetPid` deriva y devuelve el `Pid` desde la relación kernel
+  `Process.scheduler_task`;
 - el dispatcher no consulta `CAP_MANAGER`;
-- `AuditAction::SyscallInvoked` existe, pero `dispatch` no lo registra;
+- cada syscall reconocida termina con `AuditAction::SyscallCompleted`, con
+  clase estática, resultado e identidad capturada; los números desconocidos y
+  las reservas sin handler también dejan un evento fail-closed, anónimo sólo
+  cuando no existe contexto de caller;
 - `write` reconoce un puntero y una longitud, pero deliberadamente no copia el
   buffer;
 - no existen `copy_from_user`, `copy_to_user` ni recuperación de page fault
@@ -148,10 +152,14 @@ kernel `Process.scheduler_task`; ninguno se acepta como argumento. Una entrada
 sin tarea/proceso consistente retorna `Internal`, registra el error y no llega
 al handler.
 
-La captura no conserva simultáneamente locks de scheduler y ProcessTable. El
-contador `Process.syscall_count` se incrementa con overflow saturado después de
-resolver identidad. `GetPid` debe devolver `Pid`; si se necesita exponer
-`TaskId`, será otra API con semántica explícita.
+La captura no conserva simultáneamente locks de scheduler y ProcessTable. Cada
+CPU con scheduler local inicializado consulta exclusivamente su slot
+`PER_CPU_SCHEDULER`, incluido el BSP; sólo el BSP previo a esa inicialización
+usa el cursor legacy. Un slot no inicializado o una relación inexistente falla
+cerrado. El contador `Process.syscall_count` se
+incrementa con overflow saturado después de resolver identidad. `GetPid`
+devuelve `Pid`; si se necesita exponer `TaskId`, será otra API con semántica
+explícita.
 
 ## 6. Memoria de usuario
 
@@ -363,8 +371,11 @@ un General Protection Fault fatal en ring 0.
 
 1. ~~Añadir `SyscallSpec` exhaustivo y tests de los 28 números.~~ ✅
 2. ~~Implementar `UserRange` y validación pura de overflow/canonicalidad.~~ ✅
-3. Capturar `CallerContext`, corregir `GetPid` e incrementar `syscall_count`.
-4. Emitir auditoría terminal sin raw pointers y corregir el orden de locks.
+3. ~~Capturar `CallerContext`, corregir `GetPid` e incrementar `syscall_count`.~~ ✅
+4. ~~Emitir auditoría terminal sin raw pointers y corregir el orden de locks.~~ ✅
+   El resultado usa `SyscallCompleted`; el tick/CPU se capturan antes del lock
+   de auditoría y las mutaciones de capabilities se auditan después de liberar
+   `CAP_MANAGER`.
 5. Añadir page-table walk user, pin/generación y page-fault fixup acotado.
 6. Implementar copy helpers y convertir `Write` en la primera ruta real.
 7. Centralizar capability checks y añadir los permisos requeridos por la matriz.

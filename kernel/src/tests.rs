@@ -962,9 +962,18 @@ mod integration_syscall_tests {
     }
 
     #[test]
-    fn getpid_returns_current_task() {
+    fn getpid_returns_kernel_derived_pid() {
         let _guard = INTEGRATION_TEST_LOCK.lock();
-        let (_pid, task_id) = setup_test_process("test_getpid");
+        let (pid, task_id) = setup_test_process("test_getpid");
+        // Deliberately make the first PID unrelated to the running task so a
+        // result equal to TaskId would fail this test.
+        let expected_pid = {
+            let mut table = crate::process::PROCESS_TABLE.lock();
+            table.get_mut(pid).unwrap().scheduler_task = task_id + 100;
+            let child = table.create("mapped", None, task_id).unwrap();
+            table.start(child);
+            child
+        };
         let ctx = SyscallContext {
             number: SyscallNumber::GetPid as u64,
             arg1: 0,
@@ -975,9 +984,46 @@ mod integration_syscall_tests {
         };
         let res = dispatch(&ctx);
         match res {
-            SyscallResult::Ok(id) => assert_eq!(id, task_id),
-            _ => panic!("Expected Ok(task_id)"),
+            SyscallResult::Ok(returned_pid) => assert_eq!(returned_pid, expected_pid),
+            _ => panic!("Expected Ok(pid)"),
         }
+        let audit_log = crate::audit::AUDIT.lock();
+        let event = audit_log.last_n(1).next().unwrap();
+        assert_eq!(event.pid, Some(expected_pid));
+        assert!(matches!(
+            event.action,
+            crate::audit::AuditAction::SyscallCompleted {
+                number,
+                class: Some(crate::syscall::AuditClass::Process),
+            } if number == SyscallNumber::GetPid as u64
+        ));
+    }
+
+    #[test]
+    fn syscall_count_is_saturating_and_arguments_cannot_spoof_pid() {
+        let _guard = INTEGRATION_TEST_LOCK.lock();
+        let (pid, _task_id) = setup_test_process("test_syscall_count");
+        {
+            let mut table = crate::process::PROCESS_TABLE.lock();
+            table.get_mut(pid).unwrap().syscall_count = u64::MAX;
+        }
+        let res = dispatch(&SyscallContext {
+            number: SyscallNumber::GetPid as u64,
+            arg1: 0xffff_ffff,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        });
+        assert!(matches!(res, SyscallResult::Ok(value) if value == pid));
+        assert_eq!(
+            crate::process::PROCESS_TABLE
+                .lock()
+                .get(pid)
+                .unwrap()
+                .syscall_count,
+            u64::MAX
+        );
     }
 
     #[test]
@@ -1227,7 +1273,7 @@ mod security_capability_tests {
         let mut mgr = CapabilityManager::new();
         let before_events = crate::audit::AUDIT.lock().total_events();
 
-        let _cap_id = mgr
+        let cap_id = mgr
             .grant(
                 1,
                 CapScope::System,
@@ -1236,6 +1282,15 @@ mod security_capability_tests {
                 true,
             )
             .unwrap();
+
+        // Domain mutation and audit append are deliberately separate. This
+        // mirrors the kernel capability service lock ordering.
+        crate::audit::record(
+            1,
+            crate::audit::AuditAction::CapabilityGranted(cap_id),
+            None,
+            crate::audit::AuditResult::Success,
+        );
 
         let after_events = crate::audit::AUDIT.lock().total_events();
         assert_eq!(after_events, before_events + 1);
@@ -1247,6 +1302,29 @@ mod security_capability_tests {
         assert!(matches!(
             event.action,
             crate::audit::AuditAction::CapabilityGranted(_)
+        ));
+        assert!(matches!(event.result, crate::audit::AuditResult::Success));
+    }
+
+    #[test]
+    fn global_capability_revoke_audits_after_manager_unlock() {
+        let _guard = INTEGRATION_TEST_LOCK.lock();
+        let cap_id = crate::security::grant_capability(
+            77,
+            CapScope::System,
+            CapPermissions::READ,
+            RiskLevel::Low,
+            true,
+        )
+        .unwrap();
+        let before = crate::audit::AUDIT.lock().total_events();
+        crate::security::revoke_capability(cap_id).unwrap();
+        let audit_log = crate::audit::AUDIT.lock();
+        assert_eq!(audit_log.total_events(), before + 1);
+        let event = audit_log.last_n(1).next().unwrap();
+        assert!(matches!(
+            event.action,
+            crate::audit::AuditAction::CapabilityRevoked(id) if id == cap_id
         ));
         assert!(matches!(event.result, crate::audit::AuditResult::Success));
     }

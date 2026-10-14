@@ -358,13 +358,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                 scheduler.active_count(),
             )
         });
-    if let Some(task_id) = idle_task {
-        let _ = sched::enqueue_task_on_cpu(0, task_id);
-    }
-    if let Some(task_id) = init_task {
-        let init_cpu = usize::from(queue_cpu_count > 1);
-        let _ = sched::enqueue_task_on_cpu(init_cpu, task_id);
-    }
+    let idle_owner = idle_task.expect("idle task must be created");
+    let init_owner = init_task.expect("init task must be created");
+    let _ = sched::enqueue_task_on_cpu(0, idle_owner);
+    let _ = sched::enqueue_task_on_cpu(0, init_owner);
     for (cpu, task_id) in smp_worker_tasks
         .iter()
         .enumerate()
@@ -446,35 +443,22 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // === Phase 3: Syscalls & IPC ===
     serial_println!();
     serial_println!("[boot] Phase 3: Syscall dispatcher & IPC...");
-
-    // Register a test syscall to verify dispatch
-    let test_ctx = syscall::SyscallContext {
-        number: syscall::SyscallNumber::GetPid as u64,
-        arg1: 0,
-        arg2: 0,
-        arg3: 0,
-        arg4: 0,
-        arg5: 0,
-    };
-    let result = syscall::dispatch(&test_ctx);
-    serial_println!(
-        "[sys]  Syscall dispatcher ready. Test GetPid => {}",
-        result.to_raw()
-    );
+    serial_println!("[sys]  Syscall dispatcher ready (metadata gate armed)");
 
     // Test IPC: send a message between tasks
     {
         let msg = ipc::IpcMessage::new(
-            1, // sender: init
-            0, // receiver: kernel_idle
+            init_owner,
+            idle_owner,
             ipc::MessageType::Notification,
             b"boot_complete",
         )
         .unwrap();
         let _ = ipc::IPC.lock().send(msg);
-        let pending = ipc::IPC.lock().pending_count(0);
+        let pending = ipc::IPC.lock().pending_count(idle_owner);
         serial_println!(
-            "[ipc]  IPC core ready. Task 0 has {} pending message(s).",
+            "[ipc]  IPC core ready. Task {} has {} pending message(s).",
+            idle_owner,
             pending
         );
     }
@@ -486,31 +470,29 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Grant initial capabilities
     {
         use security::{CapPermissions, CapScope, RiskLevel};
-        let mut cap_mgr = security::CAP_MANAGER.lock();
         // kernel_idle gets basic read
-        cap_mgr
-            .grant(
-                0,
-                CapScope::System,
-                CapPermissions::READ,
-                RiskLevel::Low,
-                false,
-            )
-            .ok();
+        let _ = security::grant_capability(
+            idle_owner,
+            CapScope::System,
+            CapPermissions::READ,
+            RiskLevel::Low,
+            false,
+        )
+        .ok();
         // init gets full system access
-        cap_mgr
-            .grant(
-                1,
-                CapScope::System,
-                CapPermissions::READ
-                    .union(CapPermissions::WRITE)
-                    .union(CapPermissions::EXECUTE)
-                    .union(CapPermissions::IPC_SEND)
-                    .union(CapPermissions::IPC_RECV),
-                RiskLevel::High,
-                true,
-            )
-            .ok();
+        let _ = security::grant_capability(
+            init_owner,
+            CapScope::System,
+            CapPermissions::READ
+                .union(CapPermissions::WRITE)
+                .union(CapPermissions::EXECUTE)
+                .union(CapPermissions::IPC_SEND)
+                .union(CapPermissions::IPC_RECV),
+            RiskLevel::High,
+            true,
+        )
+        .ok();
+        let cap_mgr = security::CAP_MANAGER.lock();
         serial_println!(
             "[cap]  Capability manager ready: {} active caps.",
             cap_mgr.active_count()
@@ -518,15 +500,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 
     // Record boot event in audit log
-    audit::AUDIT.lock().record(
-        0,
-        audit::AuditAction::TaskCreated(0),
+    audit::record(
+        idle_owner,
+        audit::AuditAction::TaskCreated(idle_owner),
         None,
         audit::AuditResult::Success,
     );
-    audit::AUDIT.lock().record(
-        0,
-        audit::AuditAction::TaskCreated(1),
+    audit::record(
+        init_owner,
+        audit::AuditAction::TaskCreated(init_owner),
         None,
         audit::AuditResult::Success,
     );
@@ -641,22 +623,27 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // === Phase 7: User Space Init ===
     serial_println!();
     serial_println!("[boot] Phase 7: User space...");
+    let init_scheduler_task = init_owner;
     {
         let mut table = process::PROCESS_TABLE.lock();
         // Create PID 1 — the init process
-        let init_pid = table.create("init", None, 1).unwrap();
+        let init_pid = table.create("init", None, init_scheduler_task).unwrap();
         table.start(init_pid);
-
-        // Create initial system services
-        let _log_pid = table.create("log_service", Some(init_pid), 2);
-        let _net_pid = table.create("network_service", Some(init_pid), 3);
-        let _brane_pid = table.create("brane_service", Some(init_pid), 4);
 
         serial_println!(
             "[proc] Process table ready: {} active processes.",
             table.active_count()
         );
     }
+
+    // Remove idle from the first BSP handoff so the probe definitely enters
+    // init. Init exercises GetPid from its own CPU-local task context and
+    // yields back to this boot continuation; idle is restored afterwards.
+    sched::with_interrupts_disabled(|| {
+        let _ = sched::MULTICORE_SCHEDULER.lock().dequeue(0, idle_owner);
+    });
+    let _ = sched::switch_current_cpu_context();
+    let _ = sched::enqueue_task_on_cpu(0, idle_owner);
 
     // === Summary ===
     serial_println!();
@@ -1127,6 +1114,20 @@ pub fn halt_loop() -> ! {
 /// periodically yielding back to the scheduler.
 fn kernel_init_task() -> ! {
     serial_println!("[init] Kernel init task started.");
+
+    let test_ctx = syscall::SyscallContext {
+        number: syscall::SyscallNumber::GetPid as u64,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let result = syscall::dispatch(&test_ctx);
+    serial_println!(
+        "[sys]  Syscall dispatcher ready. Test GetPid => {}",
+        result.to_raw()
+    );
 
     // Future: run deferred init, service startup, etc.
 
