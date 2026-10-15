@@ -143,8 +143,9 @@ además un evento de inicio correlacionado si luego soportan bloqueo largo.
 1. ~~Introducir tabla exhaustiva sin cambiar resultados actuales.~~ ✅
 2. Capturar CallerContext y corregir semántica de `GetPid`.
 3. Añadir evento terminal y retirar logging raw.
-4. ~~Construir `UserRange` y validación pura.~~ ✅ Añadir page-table walk,
-   pin/generación y copy helpers.
+4. ~~Construir `UserRange` y validación pura.~~ ✅ Añadir walk de page tables
+   para cada página y permisos efectivos, incluyendo entradas padre y páginas
+   grandes. Añadir pin/generación y copy helpers sigue pendiente.
 5. Convertir `Write` y después IPC en rutas reales.
 6. Activar reglas de capability de forma incremental, con deny tests primero.
 7. Endurecer señal/retorno y ejecutar pruebas QEMU desde ring 3.

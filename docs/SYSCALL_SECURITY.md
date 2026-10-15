@@ -1,7 +1,7 @@
 # Mediación de syscalls y memoria de usuario — especificación de implementación
 
 > Fase: **14 — prerrequisito de plataforma y servicios aislados**.
-> Estado: **segundo corte implementado; copy y mediación dinámica pendientes**.
+> Estado: **tercer corte parcial; validación de páginas implementada, copy y mediación dinámica pendientes**.
 > Última actualización: **2026-10-14**.
 
 ## 1. Objetivo
@@ -46,6 +46,12 @@ El código actual ofrece:
 - `UserRange`, un validador puro de rangos user que comprueba null, límites de
   longitud, overflow, canonicalidad y límite configurable de espacio user, y
   expone el número de páginas afectadas sin dereferenciar memoria.
+- `UserRange::validate_pages`, que exige permisos presentes, user-accessible y
+  writable (cuando corresponde) en todas las páginas del rango;
+  `memory::paging::validate_user_range` obtiene los permisos efectivos
+  intersectando los niveles del page table activo.
+- `ProcessMemory::contains_user_range`, una guarda de ownership por regiones
+  declaradas que se usa como metadata previa, nunca como sustituto del walk.
 
 Los límites deben permanecer visibles:
 
@@ -62,6 +68,8 @@ Los límites deben permanecer visibles:
   cuando no existe contexto de caller;
 - `write` reconoce un puntero y una longitud, pero deliberadamente no copia el
   buffer;
+- la validación de páginas todavía no mantiene un pin ni una generación del
+  address space durante una operación concurrente;
 - no existen `copy_from_user`, `copy_to_user` ni recuperación de page fault
   durante una copia;
 - `sigaction` acepta una dirección de handler sin validar que sea user/canonical
@@ -186,10 +194,15 @@ pub struct UserRange {
 - suma `start + len` con overflow comprobado;
 - dirección canónica dentro del rango user configurado para el address width
   activo;
-- límite de bytes específico de la syscall;
-- todas las páginas presentes y con bit `USER_ACCESSIBLE`;
-- permiso writable para destinos de `copy_to_user`;
-- pertenencia al address space del proceso capturado.
+- límite de bytes específico de la syscall.
+
+La segunda etapa `UserRange::validate_pages` exige, para cada página tocada,
+presencia y `USER_ACCESSIBLE`, además de `WRITABLE` para destinos de
+`copy_to_user`. El adaptador `memory::paging::validate_user_range` recorre el
+page table activo e intersecta `PRESENT`, `USER_ACCESSIBLE` y `WRITABLE` desde
+PML4 hasta la entrada hoja, incluyendo páginas grandes. La pertenencia al
+address space del proceso se comprueba con la metadata de `ProcessMemory` antes
+de ese walk.
 
 Los límites de `ProcessMemory` son metadata y no sustituyen recorrer page
 tables. Validar sólo la primera página está prohibido.
@@ -273,7 +286,7 @@ cuando existan implementación y pruebas.
 |---------|--------|----------------|----------------|
 | `Exit` | Partial | `SelfOnly` | Ninguna; código escalar |
 | `Yield` | Implemented | `SelfOnly` | Ninguna |
-| `GetPid` | Implemented, retorna TaskId | `SelfOnly`; retornar Pid | Ninguna |
+| `GetPid` | Implemented, retorna Pid | `SelfOnly`; retornar Pid | Ninguna |
 | `Fork` | Unimplemented | `PROCESS_CREATE + System` | Contexto hijo sólo desde frame kernel |
 | `Exec` | Unimplemented | `EXECUTE + Service(VFS)` | Path, argv y env por copy-in acotado |
 | `WaitPid` | Unimplemented | Self/child o `READ + Process(target)` | Status por copy-out opcional |
@@ -323,8 +336,9 @@ la syscall. Denegaciones se registran aunque no exista capability ID.
 denegada. Antes de integrar la matriz se amplía con una decisión que incluya
 permiso requerido y clase de scope sin inventar el ID cero.
 
-El dispatcher actual imprime argumentos raw por serial. Esa línea se elimina o
-se limita a nombre/número y resultado para no filtrar ASLR, punteros ni secretos.
+El dispatcher limita el serial a nombre/número, caller y valores acotados como
+fd/longitud; no imprime punteros ni payloads. Esa regla debe mantenerse cuando
+se conecten los copy helpers.
 El audit ring expone cuántos eventos antiguos fueron sobrescritos; mutation/flood
 tests verifican que la saturación no corrompa secuencia ni deadlockee el kernel.
 
@@ -377,6 +391,8 @@ un General Protection Fault fatal en ring 0.
    de auditoría y las mutaciones de capabilities se auditan después de liberar
    `CAP_MANAGER`.
 5. Añadir page-table walk user, pin/generación y page-fault fixup acotado.
+   ✅ El walk de cada página y los permisos efectivos del mapper activo están
+   implementados; pin/generación/fixup siguen pendientes.
 6. Implementar copy helpers y convertir `Write` en la primera ruta real.
 7. Centralizar capability checks y añadir los permisos requeridos por la matriz.
 8. Conectar `Send`/`Recv` al IPC core con sender autenticado y buffers copiados.

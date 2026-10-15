@@ -466,10 +466,12 @@ fallback `int 0x80` conectado. Ver [`ADR-003`](ADR/ADR-003-syscall-abi.md).
 
 La frontera implementada ya añade la tabla exhaustiva para los 28 números,
 identidad derivada del estado per-CPU, `GetPid` kernel-derived, contador de
-syscalls saturado y auditoría terminal con snapshot no preemptible. Capability
-check central, copia segura de todas las páginas user y validación de
-RIP/RSP/RFLAGS antes de `sysret` siguen pendientes y son prerrequisitos para
-aislar servicios de Fase 14; ver [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md) y
+syscalls saturado, auditoría terminal con snapshot no preemptible y un walk que
+valida todas las páginas user con permisos efectivos del page table activo.
+Capability check central, pin/generación durante la copia, copia segura y
+validación de RIP/RSP/RFLAGS antes de `sysret` siguen pendientes y son
+prerrequisitos para aislar servicios de Fase 14; ver
+[`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md) y
 [`ADR-008`](ADR/ADR-008-syscall-mediation.md).
 
 ---
@@ -1092,7 +1094,7 @@ Ver carpeta [`docs/ADR/`](ADR/) para decisiones formales.
 | [ADR-005](ADR/ADR-005-virtual-memory.md) | Memoria virtual y asignación física | ✅ Baseline v0.1 |
 | [ADR-006](ADR/ADR-006-xhci-event-transfer-model.md) | Modelo de eventos y transferencias xHCI | ✅ Baseline v0.1 |
 | [ADR-007](ADR/ADR-007-pci-interrupt-delivery.md) | Entrega MSI/MSI-X y trabajo diferido | 🟡 Implementación parcial Q35 |
-| [ADR-008](ADR/ADR-008-syscall-mediation.md) | Mediación de syscalls y memoria de usuario | 🟡 Metadata + `UserRange`; copy y retorno pendientes |
+| [ADR-008](ADR/ADR-008-syscall-mediation.md) | Mediación de syscalls y memoria de usuario | 🟡 Metadata + `UserRange` + page walk; pin, copy y retorno pendientes |
 | [ADR-009](ADR/ADR-009-ipc-endpoints-wait-queues.md) | Endpoints IPC autenticados y wait queues | 📝 Propuesta Fase 14 |
 | [ADR-010](ADR/ADR-010-security-control-plane.md) | Plano de control de seguridad en servicios ring 3 | 📝 Propuesta Fase 14 |
 | [ADR-011](ADR/ADR-011-isolated-ai-runtime.md) | Runtime IA aislado y actuación mediante leases | 📝 Propuesta Fase 14 |
