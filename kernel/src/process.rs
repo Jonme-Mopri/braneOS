@@ -60,6 +60,86 @@ pub struct ProcessMemory {
     pub heap_end: u64,
 }
 
+/// Stable generation and reader pins for one process address space.
+///
+/// The page-table mapper remains owned by the memory subsystem. This state is
+/// the process-table side of the protocol: a mapping update cannot commit
+/// while a user-copy pin is active, and each pin records the generation it
+/// validated against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddressSpaceState {
+    generation: u64,
+    pins: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct AddressSpacePin {
+    pid: Pid,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressSpaceError {
+    NotFound,
+    Busy,
+    InvalidPin,
+    PinCountExhausted,
+    GenerationExhausted,
+}
+
+impl AddressSpaceState {
+    pub const fn new() -> Self {
+        Self {
+            generation: 1,
+            pins: 0,
+        }
+    }
+
+    pub const fn generation(self) -> u64 {
+        self.generation
+    }
+
+    pub const fn pin_count(self) -> u32 {
+        self.pins
+    }
+
+    fn pin(&mut self, pid: Pid) -> Result<AddressSpacePin, AddressSpaceError> {
+        self.pins = self
+            .pins
+            .checked_add(1)
+            .ok_or(AddressSpaceError::PinCountExhausted)?;
+        Ok(AddressSpacePin {
+            pid,
+            generation: self.generation,
+        })
+    }
+
+    fn release(&mut self, pin: AddressSpacePin) -> Result<(), AddressSpaceError> {
+        if pin.generation != self.generation || self.pins == 0 {
+            return Err(AddressSpaceError::InvalidPin);
+        }
+        self.pins -= 1;
+        Ok(())
+    }
+
+    fn bump_generation(&mut self) -> Result<u64, AddressSpaceError> {
+        if self.pins != 0 {
+            return Err(AddressSpaceError::Busy);
+        }
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(AddressSpaceError::GenerationExhausted)?;
+        Ok(self.generation)
+    }
+}
+
+impl Default for AddressSpaceState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProcessMemory {
     /// Return whether a complete user range belongs to one declared process
     /// region.  This is a metadata guard only: callers must still validate
@@ -109,6 +189,7 @@ pub struct Process {
     pub scheduler_task: TaskId,
     pub capabilities: [Option<CapabilityId>; 8],
     pub memory: ProcessMemory,
+    pub address_space: AddressSpaceState,
     pub exit_code: i32,
     /// CPU ticks consumed by this process.
     pub cpu_ticks: u64,
@@ -183,6 +264,7 @@ impl ProcessTable {
                         heap_start: 0x0100_0000,
                         heap_end: 0x0100_0000,
                     },
+                    address_space: AddressSpaceState::new(),
                     exit_code: 0,
                     cpu_ticks: 0,
                     syscall_count: 0,
@@ -236,6 +318,30 @@ impl ProcessTable {
     /// Get a mutable reference to a process by PID.
     pub fn get_mut(&mut self, pid: Pid) -> Option<&mut Process> {
         self.processes.iter_mut().flatten().find(|p| p.pid == pid)
+    }
+
+    /// Pin the process address-space generation while a caller validates and
+    /// copies user memory. The process-table lock is released by the caller
+    /// after this method returns; the pin remains represented in the PCB.
+    pub fn pin_address_space(&mut self, pid: Pid) -> Result<AddressSpacePin, AddressSpaceError> {
+        let process = self.get_mut(pid).ok_or(AddressSpaceError::NotFound)?;
+        process.address_space.pin(pid)
+    }
+
+    /// Release a previously acquired address-space pin.
+    pub fn release_address_space_pin(
+        &mut self,
+        pin: AddressSpacePin,
+    ) -> Result<(), AddressSpaceError> {
+        let process = self.get_mut(pin.pid).ok_or(AddressSpaceError::NotFound)?;
+        process.address_space.release(pin)
+    }
+
+    /// Commit a mapping change. Writers must wait until all user-copy pins are
+    /// released, which makes a generation change observable to later callers.
+    pub fn bump_address_space_generation(&mut self, pid: Pid) -> Result<u64, AddressSpaceError> {
+        let process = self.get_mut(pid).ok_or(AddressSpaceError::NotFound)?;
+        process.address_space.bump_generation()
     }
 
     /// Find slot index for a PID.
@@ -297,7 +403,7 @@ pub static PROCESS_TABLE: Mutex<ProcessTable> = Mutex::new(ProcessTable::new());
 
 #[cfg(test)]
 mod memory_tests {
-    use super::ProcessMemory;
+    use super::{AddressSpaceError, ProcessMemory, ProcessTable};
 
     fn memory() -> ProcessMemory {
         ProcessMemory {
@@ -325,5 +431,54 @@ mod memory_tests {
         let memory = memory();
         assert!(!memory.contains_user_range(u64::MAX - 1, 4));
         assert!(memory.contains_user_range(0, 0));
+    }
+
+    #[test]
+    fn address_space_pin_blocks_generation_changes_until_release() {
+        let mut table = ProcessTable::new();
+        let pid = table.create("mapped", None, 17).unwrap();
+        let pin = table.pin_address_space(pid).unwrap();
+        assert_eq!(table.get(pid).unwrap().address_space.generation(), 1);
+        assert_eq!(table.get(pid).unwrap().address_space.pin_count(), 1);
+        assert_eq!(
+            table.bump_address_space_generation(pid),
+            Err(AddressSpaceError::Busy)
+        );
+
+        table.release_address_space_pin(pin).unwrap();
+        assert_eq!(table.get(pid).unwrap().address_space.pin_count(), 0);
+        assert_eq!(table.bump_address_space_generation(pid), Ok(2));
+        assert_eq!(table.get(pid).unwrap().address_space.generation(), 2);
+    }
+
+    #[test]
+    fn address_space_pins_are_counted_independently() {
+        let mut table = ProcessTable::new();
+        let pid = table.create("mapped", None, 18).unwrap();
+        let first = table.pin_address_space(pid).unwrap();
+        let second = table.pin_address_space(pid).unwrap();
+        assert_eq!(table.get(pid).unwrap().address_space.pin_count(), 2);
+
+        table.release_address_space_pin(first).unwrap();
+        assert_eq!(table.get(pid).unwrap().address_space.pin_count(), 1);
+        assert_eq!(
+            table.bump_address_space_generation(pid),
+            Err(AddressSpaceError::Busy)
+        );
+        table.release_address_space_pin(second).unwrap();
+        assert_eq!(table.bump_address_space_generation(pid), Ok(2));
+    }
+
+    #[test]
+    fn pinning_unknown_process_fails_closed() {
+        let mut table = ProcessTable::new();
+        assert_eq!(
+            table.pin_address_space(999),
+            Err(AddressSpaceError::NotFound)
+        );
+        assert_eq!(
+            table.bump_address_space_generation(999),
+            Err(AddressSpaceError::NotFound)
+        );
     }
 }
