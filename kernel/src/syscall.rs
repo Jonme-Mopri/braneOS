@@ -771,7 +771,7 @@ mod user_page_validation_tests {
 // -----------------------------------------------------------------------
 
 /// Result of a syscall execution.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyscallResult {
     /// Syscall completed successfully. Value is the return data.
     Ok(u64),
@@ -843,6 +843,114 @@ pub struct CallerContext {
     pub cpu_id: u16,
 }
 
+/// Stable service scope used by the first VFS-backed syscall boundary. This
+/// is kernel policy, not a user-visible capability value.
+pub const VFS_SERVICE_ID: u64 = 1;
+
+fn capability_bits(permission: CapabilityPermission) -> crate::security::CapPermissions {
+    use crate::security::CapPermissions;
+    match permission {
+        CapabilityPermission::Read => CapPermissions::READ,
+        CapabilityPermission::Write => CapPermissions::WRITE,
+        CapabilityPermission::Execute => CapPermissions::EXECUTE,
+        CapabilityPermission::Grant => CapPermissions::GRANT,
+        CapabilityPermission::Revoke => CapPermissions::REVOKE,
+        CapabilityPermission::IpcSend => CapPermissions::IPC_SEND,
+        CapabilityPermission::IpcRecv => CapPermissions::IPC_RECV,
+        CapabilityPermission::BraneConnect => CapPermissions::BRANE_CONNECT,
+        CapabilityPermission::BraneDiscover => CapPermissions::BRANE_DISCOVER,
+        CapabilityPermission::ProcessCreate => CapPermissions::PROCESS_CREATE,
+        CapabilityPermission::ProcessSignal => CapPermissions::PROCESS_SIGNAL,
+        CapabilityPermission::MemoryMap => CapPermissions::MEMORY_MAP,
+        CapabilityPermission::BraneSend => CapPermissions::BRANE_SEND,
+        CapabilityPermission::BraneRecv => CapPermissions::BRANE_RECV,
+    }
+}
+
+fn resolve_capability_scope(
+    requirement: CapabilityRequirement,
+    caller: &CallerContext,
+    ctx: &SyscallContext,
+) -> Result<crate::security::CapScope, SyscallError> {
+    use crate::security::CapScope;
+    let scope = match requirement.scope {
+        CapabilityScope::System => CapScope::System,
+        CapabilityScope::SelfProcess => CapScope::Process(caller.task_id),
+        CapabilityScope::VfsService => CapScope::Service(VFS_SERVICE_ID),
+        CapabilityScope::TargetProcess | CapabilityScope::DestinationProcess => {
+            let target_pid = ctx.arg1;
+            let process_table = crate::process::PROCESS_TABLE.lock();
+            let task_id = process_table
+                .get_task_id_by_pid(target_pid)
+                .ok_or(SyscallError::PermissionDenied)?;
+            CapScope::Process(task_id)
+        }
+        CapabilityScope::BraneTarget => CapScope::Brane(ctx.arg1),
+    };
+    Ok(scope)
+}
+
+fn check_capability(
+    requirement: CapabilityRequirement,
+    caller: &CallerContext,
+    ctx: &SyscallContext,
+) -> Result<crate::security::CapabilityId, SyscallError> {
+    let scope = resolve_capability_scope(requirement, caller, ctx)?;
+    crate::security::CAP_MANAGER
+        .lock()
+        .check(
+            caller.task_id,
+            capability_bits(requirement.permission),
+            scope,
+        )
+        .map_err(|_| SyscallError::PermissionDenied)
+}
+
+fn target_is_self_or_child(caller: &CallerContext, ctx: &SyscallContext) -> bool {
+    crate::process::PROCESS_TABLE
+        .lock()
+        .is_self_or_child(caller.pid, ctx.arg1)
+}
+
+/// Evaluate one static authorization rule after identity capture. Scope is
+/// derived from kernel-owned process records or fixed services; no caller
+/// supplied capability ID is accepted.
+fn authorize(
+    rule: AuthorizationRule,
+    caller: &CallerContext,
+    ctx: &SyscallContext,
+) -> Result<Option<crate::security::CapabilityId>, SyscallError> {
+    match rule {
+        AuthorizationRule::Public | AuthorizationRule::SelfOnly => Ok(None),
+        AuthorizationRule::SelfOrChild if target_is_self_or_child(caller, ctx) => Ok(None),
+        AuthorizationRule::SelfOrChild => Err(SyscallError::PermissionDenied),
+        AuthorizationRule::Capability(requirement) => {
+            check_capability(requirement, caller, ctx).map(Some)
+        }
+        AuthorizationRule::SelfOrCapability(requirement) => {
+            if ctx.arg1 == caller.pid {
+                Ok(None)
+            } else {
+                check_capability(requirement, caller, ctx).map(Some)
+            }
+        }
+        AuthorizationRule::SelfOrChildOrCapability(requirement) => {
+            if target_is_self_or_child(caller, ctx) {
+                Ok(None)
+            } else {
+                check_capability(requirement, caller, ctx).map(Some)
+            }
+        }
+        AuthorizationRule::DualCapability(first, second) => {
+            let first_id = check_capability(first, caller, ctx)?;
+            check_capability(second, caller, ctx).map(|_| Some(first_id))
+        }
+        AuthorizationRule::HandleOwner | AuthorizationRule::Deny => {
+            Err(SyscallError::PermissionDenied)
+        }
+    }
+}
+
 /// Resolve the task executing on the current logical CPU and its process.
 ///
 /// An initialized CPU uses its private scheduler snapshot, including the
@@ -897,7 +1005,13 @@ pub fn dispatch(ctx: &SyscallContext) -> SyscallResult {
         None => {
             crate::serial_println!("[syscall] UNKNOWN syscall number: {}", ctx.number);
             let result = SyscallResult::Err(SyscallError::InvalidSyscall);
-            crate::audit::log_syscall(caller.as_ref(), ctx.number, None, audit_result(result));
+            crate::audit::log_syscall(
+                caller.as_ref(),
+                ctx.number,
+                None,
+                None,
+                audit_result(result),
+            );
             return result;
         }
     };
@@ -910,7 +1024,13 @@ pub fn dispatch(ctx: &SyscallContext) -> SyscallResult {
         None => {
             crate::serial_println!("[syscall] {:?} has no mediation metadata", syscall);
             let result = SyscallResult::Err(SyscallError::InvalidSyscall);
-            crate::audit::log_syscall(caller.as_ref(), syscall as u64, None, audit_result(result));
+            crate::audit::log_syscall(
+                caller.as_ref(),
+                syscall as u64,
+                None,
+                None,
+                audit_result(result),
+            );
             return result;
         }
     };
@@ -921,6 +1041,7 @@ pub fn dispatch(ctx: &SyscallContext) -> SyscallResult {
             caller.as_ref(),
             syscall as u64,
             Some(spec.audit_class),
+            None,
             audit_result(result),
         );
         return result;
@@ -935,6 +1056,22 @@ pub fn dispatch(ctx: &SyscallContext) -> SyscallResult {
                 None,
                 syscall as u64,
                 Some(spec.audit_class),
+                None,
+                audit_result(result),
+            );
+            return result;
+        }
+    };
+
+    let capability_used = match authorize(spec.authorization, &caller, ctx) {
+        Ok(capability_used) => capability_used,
+        Err(error) => {
+            let result = SyscallResult::Err(error);
+            crate::audit::log_syscall(
+                Some(&caller),
+                syscall as u64,
+                Some(spec.audit_class),
+                None,
                 audit_result(result),
             );
             return result;
@@ -985,6 +1122,7 @@ pub fn dispatch(ctx: &SyscallContext) -> SyscallResult {
         Some(&caller),
         syscall as u64,
         Some(spec.audit_class),
+        capability_used,
         audit_result(result),
     );
 

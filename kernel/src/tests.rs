@@ -914,6 +914,7 @@ mod integration_syscall_tests {
         *sched = crate::sched::Scheduler::new();
         *p_table = crate::process::ProcessTable::new();
         *crate::signal::SIGNAL_MANAGER.lock() = crate::signal::SignalManager::new();
+        *crate::security::CAP_MANAGER.lock() = crate::security::CapabilityManager::new();
 
         let task_id = sched
             .add_task(name, crate::sched::Priority::Normal)
@@ -922,6 +923,20 @@ mod integration_syscall_tests {
 
         let pid = p_table.create(name, None, task_id).unwrap();
         p_table.start(pid);
+        drop(p_table);
+        drop(sched);
+
+        // The partial Write handler models stdout through the VFS service;
+        // tests grant exactly that scoped permission instead of bypassing the
+        // dispatcher policy.
+        crate::security::grant_capability(
+            task_id,
+            crate::security::CapScope::Service(crate::syscall::VFS_SERVICE_ID),
+            crate::security::CapPermissions::WRITE,
+            crate::security::RiskLevel::Low,
+            true,
+        )
+        .unwrap();
 
         (pid, task_id)
     }
@@ -964,7 +979,15 @@ mod integration_syscall_tests {
     #[test]
     fn syscall_dispatch_write_returns_len() {
         let _guard = INTEGRATION_TEST_LOCK.lock();
-        let (_pid, _task_id) = setup_test_process("test_write");
+        let (_pid, task_id) = setup_test_process("test_write");
+        let cap_id = crate::security::CAP_MANAGER
+            .lock()
+            .check(
+                task_id,
+                crate::security::CapPermissions::WRITE,
+                crate::security::CapScope::Service(crate::syscall::VFS_SERVICE_ID),
+            )
+            .unwrap();
         let ctx = SyscallContext {
             number: SyscallNumber::Write as u64,
             arg1: 1, // fd = stdout
@@ -978,6 +1001,47 @@ mod integration_syscall_tests {
             SyscallResult::Ok(len) => assert_eq!(len, 42),
             _ => panic!("Expected Ok(42)"),
         }
+        assert_eq!(
+            crate::audit::AUDIT
+                .lock()
+                .last_n(1)
+                .next()
+                .unwrap()
+                .capability_used,
+            Some(cap_id)
+        );
+    }
+
+    #[test]
+    fn capability_denial_happens_before_partial_handler() {
+        let _guard = INTEGRATION_TEST_LOCK.lock();
+        let (pid, task_id) = setup_test_process("test_write_denied");
+        *crate::security::CAP_MANAGER.lock() = crate::security::CapabilityManager::new();
+        let before_events = crate::audit::AUDIT.lock().total_events();
+        let result = dispatch(&SyscallContext {
+            number: SyscallNumber::Write as u64,
+            arg1: 1,
+            arg2: 0x1000,
+            arg3: 7,
+            arg4: 0,
+            arg5: 0,
+        });
+
+        assert_eq!(result, SyscallResult::Err(SyscallError::PermissionDenied));
+        assert_eq!(
+            crate::process::PROCESS_TABLE
+                .lock()
+                .get(pid)
+                .unwrap()
+                .syscall_count,
+            1
+        );
+        let audit_log = crate::audit::AUDIT.lock();
+        assert_eq!(audit_log.total_events(), before_events + 1);
+        let event = audit_log.last_n(1).next().unwrap();
+        assert_eq!(event.source, Some(task_id));
+        assert_eq!(event.capability_used, None);
+        assert_eq!(event.result, crate::audit::AuditResult::Denied);
     }
 
     #[test]

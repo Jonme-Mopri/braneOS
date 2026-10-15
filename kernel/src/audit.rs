@@ -246,6 +246,7 @@ pub fn log_syscall(
     caller: Option<&crate::syscall::CallerContext>,
     number: u64,
     class: Option<crate::syscall::AuditClass>,
+    capability_used: Option<CapabilityId>,
     result: AuditResult,
 ) {
     let (tick, cpu_id) = snapshot_tick_cpu();
@@ -260,7 +261,7 @@ pub fn log_syscall(
         tick,
         origin,
         AuditAction::SyscallCompleted { number, class },
-        None,
+        capability_used,
         result,
     );
 }

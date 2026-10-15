@@ -467,9 +467,9 @@ fallback `int 0x80` conectado. Ver [`ADR-003`](ADR/ADR-003-syscall-abi.md).
 La frontera implementada ya añade la tabla exhaustiva para los 28 números,
 identidad derivada del estado per-CPU, `GetPid` kernel-derived, contador de
 syscalls saturado, auditoría terminal con snapshot no preemptible, un walk que
-valida todas las páginas user con permisos efectivos del page table activo y un
-protocolo de pin/generación en cada PCB. Capability check central, acople del
-pin al mapper durante la copia, copia segura y
+valida todas las páginas user con permisos efectivos del page table activo, un
+protocolo de pin/generación en cada PCB y autorización dinámica para handlers
+activos. El acople del pin al mapper durante la copia, copia segura y
 validación de RIP/RSP/RFLAGS antes de `sysret` siguen pendientes y son
 prerrequisitos para aislar servicios de Fase 14; ver
 [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md) y
@@ -566,8 +566,8 @@ CapabilityManager::revoke(cap_id) -> Result<(), CapError>
 Expiración, autenticidad criptográfica, delegación y persistencia son parte del
 contrato futuro, no campos implementados en v0.1.
 La asignación concreta de permisos/scopes a syscalls se mantiene en
-[`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md); ninguna tabla allí descrita debe
-presentarse como activa hasta que el dispatcher invoque `CapabilityManager`.
+[`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md); las reglas sólo se presentan como
+activas para los handlers que el dispatcher ya media con `CapabilityManager`.
 La emisión futura permanece en kernel, pero sólo acepta commits del broker
 bindeado durante bootstrap; roles, expiración y teardown generacional se
 especifican en [`SECURITY_SERVICES.md`](SECURITY_SERVICES.md).

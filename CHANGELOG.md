@@ -13,6 +13,10 @@ All notable changes to Brane OS are documented here. The project follows
   per-process address-space pin/generation protocol. Mapper coupling,
   recoverable copy faults and user-copy helpers remain disabled until the next
   syscall boundary increment.
+- Dynamic capability mediation for implemented and partial syscall handlers:
+  process/service/brane scopes are derived from kernel state, internal policy
+  permissions are separated from the ABI, successful checks retain their
+  `CapabilityId` in terminal audit events, and denials stop before handlers.
 - Trusted syscall caller capture from the BSP/AP scheduler and process table,
   kernel-derived `GetPid`, saturating per-process syscall accounting, and
   terminal `SyscallCompleted` audit events with PID/TaskId/CPU origin. Audit

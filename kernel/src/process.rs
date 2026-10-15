@@ -320,6 +320,17 @@ impl ProcessTable {
         self.processes.iter_mut().flatten().find(|p| p.pid == pid)
     }
 
+    /// Resolve a kernel-owned process PID to its scheduler task identity.
+    pub fn get_task_id_by_pid(&self, pid: Pid) -> Option<TaskId> {
+        self.get(pid).map(|process| process.scheduler_task)
+    }
+
+    /// Check the relationship used by `SelfOrChild` syscall rules.
+    pub fn is_self_or_child(&self, caller_pid: Pid, target_pid: Pid) -> bool {
+        target_pid == caller_pid
+            || self.get(target_pid).and_then(|process| process.parent_pid) == Some(caller_pid)
+    }
+
     /// Pin the process address-space generation while a caller validates and
     /// copies user memory. The process-table lock is released by the caller
     /// after this method returns; the pin remains represented in the PCB.
