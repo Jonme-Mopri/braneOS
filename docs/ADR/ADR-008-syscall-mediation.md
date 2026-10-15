@@ -148,7 +148,9 @@ además un evento de inicio correlacionado si luego soportan bloqueo largo.
    grandes, más el protocolo de pin/generación en `ProcessTable`. Acoplar el
    pin al mapper, añadir fixup y construir copy helpers sigue pendiente.
 5. Convertir `Write` y después IPC en rutas reales.
-6. Activar reglas de capability de forma incremental, con deny tests primero.
+6. ~~Activar reglas de capability de forma incremental, con deny tests primero.~~ ✅
+   Handlers activos derivan scopes y conservan el `CapabilityId`; las reservas
+   sin implementación siguen fail-closed.
 7. Endurecer señal/retorno y ejecutar pruebas QEMU desde ring 3.
 
 Cada paso conserva tests de ABI existentes. Un número sólo cambia de `Partial`

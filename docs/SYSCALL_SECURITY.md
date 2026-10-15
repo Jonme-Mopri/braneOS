@@ -1,7 +1,7 @@
 # Mediación de syscalls y memoria de usuario — especificación de implementación
 
 > Fase: **14 — prerrequisito de plataforma y servicios aislados**.
-> Estado: **tercer corte parcial; validación de páginas implementada, copy y mediación dinámica pendientes**.
+> Estado: **cuarto corte parcial; validación, pin y auth de handlers activos implementados, copy y retorno pendientes**.
 > Última actualización: **2026-10-14**.
 
 ## 1. Objetivo
@@ -35,8 +35,8 @@ El código actual ofrece:
 - 28 números agrupados por procesos, memoria, I/O, IPC, capabilities, sistema,
   Brane y señales;
 - rechazo de números desconocidos y diez códigos de error estables;
-- `CapabilityManager` con 256 entradas, owner `TaskId`, cuatro scopes y nueve
-  permisos;
+- `CapabilityManager` con 256 entradas, owner `TaskId`, cuatro scopes, nueve
+  permisos del wire vocabulary y cinco bits internos de mediación;
 - audit ring volátil de 512 eventos con secuencia y resultado;
 - tabla de 128 procesos enlazada al scheduler por `TaskId`;
 - handlers seleccionados para procesos, I/O, IPC, sistema y señales.
@@ -54,6 +54,10 @@ El código actual ofrece:
   declaradas que se usa como metadata previa, nunca como sustituto del walk.
 - `ProcessTable` mantiene un protocolo de generación y pin por proceso: una
   mutación de mappings no puede avanzar mientras una copia tiene un pin activo.
+- El dispatcher resuelve la autorización declarada para handlers activos,
+  deriva scopes desde `ProcessTable` o servicios fijos y conserva el
+  `CapabilityId` usado en el evento terminal; las reservas no implementadas
+  siguen bloqueadas antes de consultar capabilities.
 
 Los límites deben permanecer visibles:
 
@@ -63,7 +67,9 @@ Los límites deben permanecer visibles:
   stub;
 - `GetPid` deriva y devuelve el `Pid` desde la relación kernel
   `Process.scheduler_task`;
-- el dispatcher no consulta `CAP_MANAGER`;
+- las reglas `Capability`, `SelfOrCapability`, `SelfOrChildOrCapability` y
+  `DualCapability` ya se aplican a handlers activos; scopes de reservas aún no
+  alcanzables esperan su implementación real;
 - cada syscall reconocida termina con `AuditAction::SyscallCompleted`, con
   clase estática, resultado e identidad capturada; los números desconocidos y
   las reservas sin handler también dejan un evento fail-closed, anónimo sólo
@@ -255,14 +261,14 @@ El dispatcher usa capacidades ambientadas en la tarea autenticada. El caller no
 elige qué `CapabilityId` será aceptada; el manager encuentra una capability
 vigente que satisfaga permiso y scope exactos y devuelve su ID para auditoría.
 
-Los nueve permisos actuales se conservan:
+Los nueve permisos del vocabulary existente se conservan:
 
 ```text
 READ, WRITE, EXECUTE, GRANT, REVOKE,
 IPC_SEND, IPC_RECV, BRANE_CONNECT, BRANE_DISCOVER
 ```
 
-La matriz requiere añadir permisos internos antes de implementar sus handlers:
+La matriz usa además permisos internos para las rutas activas y las futuras:
 
 ```text
 PROCESS_CREATE, PROCESS_SIGNAL, MEMORY_MAP, BRANE_SEND, BRANE_RECV
@@ -300,12 +306,12 @@ cuando existan implementación y pruebas.
 | `WaitPid` | Unimplemented | Self/child o `READ + Process(target)` | Status por copy-out opcional |
 | `Mmap` | Unimplemented | `MEMORY_MAP + Process(self)` | Descriptor/offset validados |
 | `Munmap` | Unimplemented | `MEMORY_MAP + Process(self)` | Rango escalar validado |
-| `Write` | Stub que acepta longitud | `WRITE` sobre servicio derivado del fd | Buffer copy-in |
+| `Write` | Stub con `WRITE` sobre servicio VFS | `WRITE` sobre servicio derivado del fd | Buffer copy-in |
 | `Read` | Unimplemented | `READ` sobre servicio derivado del fd | Buffer copy-out |
 | `Open` | Unimplemented | `READ`/`WRITE`/`EXECUTE + Service(VFS)` según flags | Path copy-in |
 | `Close` | Unimplemented | Ownership del handle | Ninguna |
-| `Send` | Stub con éxito | `IPC_SEND + Process(dest)` | Header/payload copy-in, máx. 4 KiB |
-| `Recv` | Stub `NoMessage` | `IPC_RECV + Process(self)` | Mensaje copy-out |
+| `Send` | Stub con `IPC_SEND` sobre destino derivado | `IPC_SEND + Process(dest)` | Header/payload copy-in, máx. 4 KiB |
+| `Recv` | Stub `NoMessage` con `IPC_RECV` sobre caller | `IPC_RECV + Process(self)` | Mensaje copy-out |
 | `SendRecv` | Unimplemented | Requiere ambas reglas IPC | Copy-in y copy-out separados |
 | `RequestCap` | Unimplemented | Solicitud autenticada al broker | Request versionado copy-in |
 | `ReleaseCap` | Unimplemented | Owner; `REVOKE` para otro sujeto | Ninguna |
@@ -316,7 +322,7 @@ cuando existan implementación y pruebas.
 | `BraneConnect` | Unimplemented | `BRANE_CONNECT + Brane(id)` | Request/resultado versionados |
 | `BraneSend` | Unimplemented | `BRANE_SEND + Brane(id)` | Payload copy-in |
 | `BraneRecv` | Unimplemented | `BRANE_RECV + Brane(id)` | Payload copy-out |
-| `Kill` | Implemented sin auth | Self/child o `PROCESS_SIGNAL + Process(target)` | Ninguna |
+| `Kill` | Implemented con Self/child o capability de proceso | Self/child o `PROCESS_SIGNAL + Process(target)` | Ninguna |
 | `SigAction` | Implemented parcial | `SelfOnly` | Validar handler y struct opcional |
 | `SigReturn` | Implemented parcial | Frame kernel single-use | No aceptar contexto arbitrario user |
 | `SigProcMask` | Implemented | `SelfOnly` | Máscara escalar |
@@ -404,6 +410,8 @@ un General Protection Fault fatal en ring 0.
    al mapper y el fixup siguen pendientes.
 6. Implementar copy helpers y convertir `Write` en la primera ruta real.
 7. Centralizar capability checks y añadir los permisos requeridos por la matriz.
+   ✅ Las reglas se aplican a handlers activos, con scopes derivados y
+   `CapabilityId` conservado en auditoría; faltan rutas aún no implementadas.
 8. Conectar `Send`/`Recv` al IPC core con sender autenticado y buffers copiados.
 9. Endurecer señales y pasar `UserContext` explícito al dispatcher.
 10. Añadir pruebas ring 3/QEMU y sólo entonces habilitar servicios de Fase 14.

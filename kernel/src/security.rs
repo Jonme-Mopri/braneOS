@@ -59,6 +59,13 @@ impl CapPermissions {
     pub const IPC_RECV: Self = Self(1 << 6);
     pub const BRANE_CONNECT: Self = Self(1 << 7);
     pub const BRANE_DISCOVER: Self = Self(1 << 8);
+    /// Internal policy bits used by syscall mediation; these are not ABI
+    /// values and are never accepted from a user-supplied bitfield.
+    pub const PROCESS_CREATE: Self = Self(1 << 9);
+    pub const PROCESS_SIGNAL: Self = Self(1 << 10);
+    pub const MEMORY_MAP: Self = Self(1 << 11);
+    pub const BRANE_SEND: Self = Self(1 << 12);
+    pub const BRANE_RECV: Self = Self(1 << 13);
 
     pub fn has(self, perm: Self) -> bool {
         self.0 & perm.0 == perm.0
