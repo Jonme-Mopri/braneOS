@@ -12,7 +12,7 @@ una descripción de diseño no implica por sí sola que exista código ejecutabl
 | Área | Estado verificable | Siguiente límite |
 |------|--------------------|------------------|
 | Kernel base, memoria, IPC y shell | ✅ Operativo en QEMU | Mediar syscalls y memoria ring 3 |
-| Metadata de syscalls y rangos user | 🟡 Validación de rangos y páginas en host | User-copy con pin/fixup, capabilities y retorno seguro |
+| Metadata de syscalls y rangos user | 🟡 Validación de rangos, páginas y generaciones en host | User-copy con mapper pin/fixup, capabilities y retorno seguro |
 | IPC entre procesos | 🟡 Colas kernel probadas en host | Endpoints, sender autenticado y wait queues |
 | Seguridad y auditoría | 🟡 Baseline en kernel | Cuatro servicios raíz y bootstrap fail-closed |
 | IA | 🟡 ObserveOnly sintético en kernel | Runtime/modelo aislados y telemetría real |

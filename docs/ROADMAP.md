@@ -450,9 +450,11 @@ recorre todas las páginas tocadas, `memory::paging::validate_user_range`
 intersecta permisos efectivos desde PML4 hasta la hoja (incluidas páginas
 grandes) y `ProcessMemory::contains_user_range` aporta una guarda de ownership
 por regiones. El walk no habilita aún copias: pin/generación del address space,
-fixup recuperable y `copy_from_user`/`copy_to_user` siguen pendientes. Los tests
-host suben a 215 y cubren segunda página inválida, permisos de escritura y
-metadata de regiones.
+fixup recuperable y `copy_from_user`/`copy_to_user` siguen pendientes. El
+protocolo de pin/generación ya bloquea cambios mientras una validación está
+activa, pero todavía debe acoplarse al mapper. Los tests host suben a 218 y
+cubren segunda página inválida, permisos de escritura, metadata de regiones y
+el protocolo de pin/generación.
 
 ---
 
@@ -463,7 +465,7 @@ aplicaciones y dispositivos Brane.
 
 | Componente | Estado | Prioridad | Dependencia |
 |-----------|--------|-----------|-------------|
-| Mediación syscall y memoria ring 3 | 🟡 | ALTA | Metadata, caller audit y walk de páginas implementados; pin/fixup, user-copy, capability y retorno seguro siguen en `SYSCALL_SECURITY.md` |
+| Mediación syscall y memoria ring 3 | 🟡 | ALTA | Metadata, caller audit, walk de páginas y protocolo de pin/generación implementados; acople/fixup, user-copy, capability y retorno seguro siguen en `SYSCALL_SECURITY.md` |
 | IPC autenticado y wait queues | 🔲 | ALTA | Endpoints generacionales, sender kernel y park/notify definidos en `IPC_RUNTIME.md` |
 | Plano de control de seguridad ring 3 | 🔲 | ALTA | Bootstrap audit → identity → policy → broker definido en `SECURITY_SERVICES.md` |
 | Runtime IA aislado | 🔲 | ALTA | `ControlReady`, telemetría tipada, sandbox y leases definidos en `AI_RUNTIME.md` |
@@ -508,7 +510,7 @@ generation conforme a [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) y
 |---------|-------|
 | **Módulos del kernel** | 40 archivos de módulo (excluye `lib.rs`, `main.rs`, `tests.rs`) |
 | **Líneas de código (Rust)** | ~23,000 |
-| **Unit tests** | 215 (incluye metadata exhaustiva de syscalls, identidad/auditoría terminal, `UserRange`, walk de páginas y ownership ambiguo/terminado, USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, registry de vectores, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
+| **Unit tests** | 218 (incluye metadata exhaustiva de syscalls, identidad/auditoría terminal, `UserRange`, walk de páginas, pin/generación y ownership ambiguo/terminado, USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, registry de vectores, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
 | **Syscalls definidas** | 28 (incluye Kill, SigAction, SigReturn, SigProcMask) |
 | **Harnesses de test Python** | 8 (boot + ACPI S3 + 2 security + 2 integration + 2 e2e) |
 | **CI checks** | 15 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, PCI interrupts, USB HID, USB storage, ACPI S3, security, integration, E2E) |

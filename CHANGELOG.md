@@ -9,9 +9,10 @@ All notable changes to Brane OS are documented here. The project follows
 
 - Page-table-aware user-range validation for every touched page, including
   effective `PRESENT`, `USER_ACCESSIBLE` and `WRITABLE` permissions across
-  parent entries and large pages, plus process-region ownership metadata.
-  Address-space pin/generation, recoverable copy faults and user-copy helpers
-  remain disabled until the next syscall boundary increment.
+  parent entries and large pages, plus process-region ownership metadata and a
+  per-process address-space pin/generation protocol. Mapper coupling,
+  recoverable copy faults and user-copy helpers remain disabled until the next
+  syscall boundary increment.
 - Trusted syscall caller capture from the BSP/AP scheduler and process table,
   kernel-derived `GetPid`, saturating per-process syscall accounting, and
   terminal `SyscallCompleted` audit events with PID/TaskId/CPU origin. Audit

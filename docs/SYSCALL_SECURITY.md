@@ -52,6 +52,8 @@ El código actual ofrece:
   intersectando los niveles del page table activo.
 - `ProcessMemory::contains_user_range`, una guarda de ownership por regiones
   declaradas que se usa como metadata previa, nunca como sustituto del walk.
+- `ProcessTable` mantiene un protocolo de generación y pin por proceso: una
+  mutación de mappings no puede avanzar mientras una copia tiene un pin activo.
 
 Los límites deben permanecer visibles:
 
@@ -68,8 +70,8 @@ Los límites deben permanecer visibles:
   cuando no existe contexto de caller;
 - `write` reconoce un puntero y una longitud, pero deliberadamente no copia el
   buffer;
-- la validación de páginas todavía no mantiene un pin ni una generación del
-  address space durante una operación concurrente;
+- el protocolo de pin/generación todavía no está acoplado a un mapper de
+  address space real ni a un fixup de page fault durante una copia;
 - no existen `copy_from_user`, `copy_to_user` ni recuperación de page fault
   durante una copia;
 - `sigaction` acepta una dirección de handler sin validar que sea user/canonical
@@ -236,6 +238,12 @@ estas garantías:
 - read lock más generación de mappings, con revalidación; o
 - excepción recuperable con fixup de page fault para las instrucciones de copia.
 
+El `ProcessTable` ya ofrece la primera mitad del contrato: `pin_address_space`
+devuelve la generación observada y `bump_address_space_generation` falla con
+`Busy` mientras haya pins. El mapper y el futuro copy helper deben mantener ese
+pin durante el walk y la copia, revalidar la generación al terminar y convertir
+un fault recuperable en `InvalidArgument`.
+
 La baseline elegida será pin/lock de address space más un fixup acotado. Un
 fault de copia retorna `InvalidArgument`; no lleva al kernel a `halt_loop`.
 Cuando SMAP esté habilitado, un guard mínimo ejecuta `stac`/`clac` sólo alrededor
@@ -392,7 +400,8 @@ un General Protection Fault fatal en ring 0.
    `CAP_MANAGER`.
 5. Añadir page-table walk user, pin/generación y page-fault fixup acotado.
    ✅ El walk de cada página y los permisos efectivos del mapper activo están
-   implementados; pin/generación/fixup siguen pendientes.
+   implementados, junto al protocolo de pin/generación por proceso; el acople
+   al mapper y el fixup siguen pendientes.
 6. Implementar copy helpers y convertir `Write` en la primera ruta real.
 7. Centralizar capability checks y añadir los permisos requeridos por la matriz.
 8. Conectar `Send`/`Recv` al IPC core con sender autenticado y buffers copiados.
