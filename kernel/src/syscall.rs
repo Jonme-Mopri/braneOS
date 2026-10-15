@@ -512,15 +512,63 @@ pub enum UserRangeError {
     InvalidUserLimit,
 }
 
+/// Effective permissions observed for one user virtual page.
+///
+/// The page-table walk is deliberately kept outside [`UserRange`].  This
+/// small value lets the range validator be exercised on a host with a fake
+/// page resolver, while the bare-metal adapter in `memory::paging` obtains the
+/// same bits from the active mapper.  A page is usable only when `present` and
+/// `user_accessible` are both set; writes additionally require `writable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserPagePermissions {
+    pub present: bool,
+    pub user_accessible: bool,
+    pub writable: bool,
+}
+
+impl UserPagePermissions {
+    pub const fn unmapped() -> Self {
+        Self {
+            present: false,
+            user_accessible: false,
+            writable: false,
+        }
+    }
+
+    pub const fn user_read_only() -> Self {
+        Self {
+            present: true,
+            user_accessible: true,
+            writable: false,
+        }
+    }
+
+    pub const fn user_writable() -> Self {
+        Self {
+            present: true,
+            user_accessible: true,
+            writable: true,
+        }
+    }
+}
+
+/// A page failed the second-stage mapping/permission check for a range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserPageValidationError {
+    Unmapped { page: u64 },
+    NotUserAccessible { page: u64 },
+    NotWritable { page: u64 },
+}
+
 /// A validated user range. This type contains no page-table references: page
 /// presence, `USER_ACCESSIBLE`, and write permission are checked by the later
 /// copy/pin layer. Keeping this constructor pure makes hostile pointer cases
 /// testable on the host without dereferencing the address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserRange {
-    pub start: u64,
-    pub len: usize,
-    pub access: UserAccess,
+    start: u64,
+    len: usize,
+    access: UserAccess,
 }
 
 impl UserRange {
@@ -580,6 +628,18 @@ impl UserRange {
         self.len == 0
     }
 
+    pub const fn start(self) -> u64 {
+        self.start
+    }
+
+    pub const fn len(self) -> usize {
+        self.len
+    }
+
+    pub const fn access(self) -> UserAccess {
+        self.access
+    }
+
     pub fn end_exclusive(self) -> Result<u64, UserRangeError> {
         self.start
             .checked_add(self.len as u64)
@@ -598,12 +658,112 @@ impl UserRange {
     pub fn crosses_page_boundary(self) -> bool {
         self.page_count() > 1
     }
+
+    /// Validate every page touched by this range using a page-table resolver.
+    ///
+    /// The resolver receives page-aligned virtual addresses and must return
+    /// the effective permissions for that page.  The callback is invoked
+    /// once per page, including the first and last partial pages; callers must
+    /// not validate only the first page.  No user address is dereferenced by
+    /// this method, which makes it suitable for host-side tests and lets the
+    /// kernel keep page-table pinning/fault recovery in a later layer.
+    pub fn validate_pages<F>(self, mut resolve: F) -> Result<(), UserPageValidationError>
+    where
+        F: FnMut(u64) -> UserPagePermissions,
+    {
+        if self.is_empty() {
+            return Ok(());
+        }
+
+        let first_page = (self.start / USER_PAGE_SIZE) * USER_PAGE_SIZE;
+        for page_index in 0..self.page_count() {
+            // A range produced by `new` cannot overflow here: its end is
+            // canonical and no greater than USER_ADDRESS_MAX + 1.
+            let page = first_page + page_index * USER_PAGE_SIZE;
+            let permissions = resolve(page);
+            if !permissions.present {
+                return Err(UserPageValidationError::Unmapped { page });
+            }
+            if !permissions.user_accessible {
+                return Err(UserPageValidationError::NotUserAccessible { page });
+            }
+            if self.access == UserAccess::Write && !permissions.writable {
+                return Err(UserPageValidationError::NotWritable { page });
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn is_canonical_user_address(address: u64) -> bool {
     // A valid user address is in the canonical low half. The explicit mask
     // keeps this helper independent of `x86_64::VirtAddr` and safe on host.
     address <= USER_ADDRESS_MAX
+}
+
+#[cfg(test)]
+mod user_page_validation_tests {
+    use super::{UserAccess, UserPagePermissions, UserPageValidationError, UserRange};
+
+    #[test]
+    fn validates_every_page_in_a_cross_page_read() {
+        let range = UserRange::new(0x4fff, 2, UserAccess::Read, 2).unwrap();
+        let mut seen = [0u64; 2];
+        let mut count = 0;
+
+        range
+            .validate_pages(|page| {
+                seen[count] = page;
+                count += 1;
+                UserPagePermissions::user_read_only()
+            })
+            .unwrap();
+
+        assert_eq!(seen, [0x4000, 0x5000]);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn rejects_an_unmapped_second_page_before_copy() {
+        let range = UserRange::new(0x4fff, 2, UserAccess::Read, 2).unwrap();
+
+        let result = range.validate_pages(|page| {
+            if page == 0x5000 {
+                UserPagePermissions::unmapped()
+            } else {
+                UserPagePermissions::user_read_only()
+            }
+        });
+
+        assert_eq!(
+            result,
+            Err(UserPageValidationError::Unmapped { page: 0x5000 })
+        );
+    }
+
+    #[test]
+    fn write_requires_writable_user_pages() {
+        let range = UserRange::new(0x4000, 1, UserAccess::Write, 1).unwrap();
+        let result = range.validate_pages(|_| UserPagePermissions::user_read_only());
+
+        assert_eq!(
+            result,
+            Err(UserPageValidationError::NotWritable { page: 0x4000 })
+        );
+    }
+
+    #[test]
+    fn empty_range_does_not_query_page_tables() {
+        let range = UserRange::new(0, 0, UserAccess::Write, 0).unwrap();
+        let mut calls = 0;
+        range
+            .validate_pages(|_| {
+                calls += 1;
+                UserPagePermissions::unmapped()
+            })
+            .unwrap();
+        assert_eq!(calls, 0);
+    }
 }
 
 // -----------------------------------------------------------------------

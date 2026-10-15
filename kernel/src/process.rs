@@ -60,6 +60,44 @@ pub struct ProcessMemory {
     pub heap_end: u64,
 }
 
+impl ProcessMemory {
+    /// Return whether a complete user range belongs to one declared process
+    /// region.  This is a metadata guard only: callers must still validate
+    /// every page against the process page table before copying.
+    pub fn contains_user_range(&self, start: u64, len: usize) -> bool {
+        if len == 0 {
+            // Empty ranges do not touch memory.  `UserRange` separately
+            // enforces canonicality and the configured user address limit.
+            return true;
+        }
+
+        let end = match start.checked_add(len as u64) {
+            Some(end) => end,
+            None => return false,
+        };
+
+        let fits = |region_start: u64, region_size: u64| {
+            let region_end = match region_start.checked_add(region_size) {
+                Some(end) => end,
+                None => return false,
+            };
+            start >= region_start && end <= region_end
+        };
+
+        let stack_start = match self.stack_top.checked_sub(self.stack_size) {
+            Some(start) => start,
+            None => return false,
+        };
+
+        fits(self.code_start, self.code_size)
+            || fits(stack_start, self.stack_size)
+            || fits(
+                self.heap_start,
+                self.heap_end.saturating_sub(self.heap_start),
+            )
+    }
+}
+
 /// Process Control Block — one per user-space process.
 #[derive(Debug, Clone)]
 pub struct Process {
@@ -256,3 +294,36 @@ impl ProcessTable {
 
 /// Global process table.
 pub static PROCESS_TABLE: Mutex<ProcessTable> = Mutex::new(ProcessTable::new());
+
+#[cfg(test)]
+mod memory_tests {
+    use super::ProcessMemory;
+
+    fn memory() -> ProcessMemory {
+        ProcessMemory {
+            code_start: 0x0040_0000,
+            code_size: 0x2000,
+            stack_top: 0x0080_0000,
+            stack_size: 0x4000,
+            heap_start: 0x0100_0000,
+            heap_end: 0x0100_3000,
+        }
+    }
+
+    #[test]
+    fn metadata_accepts_only_ranges_fully_inside_one_region() {
+        let memory = memory();
+        assert!(memory.contains_user_range(0x0040_0100, 0x100));
+        assert!(memory.contains_user_range(0x007f_f000, 0x100));
+        assert!(memory.contains_user_range(0x0100_1000, 0x100));
+        assert!(!memory.contains_user_range(0x0040_1ff0, 0x20));
+        assert!(!memory.contains_user_range(0x0040_1ff0, 0x100));
+    }
+
+    #[test]
+    fn metadata_rejects_overflow_and_empty_ranges_are_noops() {
+        let memory = memory();
+        assert!(!memory.contains_user_range(u64::MAX - 1, 4));
+        assert!(memory.contains_user_range(0, 0));
+    }
+}
