@@ -147,12 +147,6 @@ impl CapabilityManager {
                     scope,
                     risk_level
                 );
-                crate::audit::AUDIT.lock().record(
-                    owner,
-                    crate::audit::AuditAction::CapabilityGranted(id),
-                    None,
-                    crate::audit::AuditResult::Success,
-                );
                 return Ok(id);
             }
         }
@@ -180,21 +174,9 @@ impl CapabilityManager {
             if let Some(cap) = slot {
                 if cap.id == cap_id {
                     if !cap.revocable {
-                        crate::audit::AUDIT.lock().record(
-                            cap.owner,
-                            crate::audit::AuditAction::CapabilityRevoked(cap_id),
-                            None,
-                            crate::audit::AuditResult::Denied,
-                        );
                         return Err(CapError::PermissionDenied);
                     }
                     crate::serial_println!("[cap]  Revoked cap #{}", cap_id);
-                    crate::audit::AUDIT.lock().record(
-                        cap.owner,
-                        crate::audit::AuditAction::CapabilityRevoked(cap_id),
-                        None,
-                        crate::audit::AuditResult::Success,
-                    );
                     *slot = None;
                     return Ok(());
                 }
@@ -219,3 +201,72 @@ impl CapabilityManager {
 
 /// Global capability manager.
 pub static CAP_MANAGER: Mutex<CapabilityManager> = Mutex::new(CapabilityManager::new());
+
+/// Grant through the global service boundary. The capability mutation is
+/// committed before its audit event is appended, so CAP_MANAGER is never held
+/// while the audit path snapshots scheduler time.
+pub fn grant_capability(
+    owner: TaskId,
+    scope: CapScope,
+    permissions: CapPermissions,
+    risk_level: RiskLevel,
+    revocable: bool,
+) -> Result<CapabilityId, CapError> {
+    let result = CAP_MANAGER
+        .lock()
+        .grant(owner, scope, permissions, risk_level, revocable);
+    if let Ok(cap_id) = result {
+        crate::audit::record(
+            owner,
+            crate::audit::AuditAction::CapabilityGranted(cap_id),
+            None,
+            crate::audit::AuditResult::Success,
+        );
+    }
+    result
+}
+
+/// Revoke through the global service boundary, preserving an audit event for
+/// both successful and denied revocations without holding CAP_MANAGER.
+pub fn revoke_capability(cap_id: CapabilityId) -> Result<(), CapError> {
+    let (owner, result) = {
+        let mut manager = CAP_MANAGER.lock();
+        let owner = manager
+            .capabilities
+            .iter()
+            .flatten()
+            .find(|cap| cap.id == cap_id)
+            .map(|cap| cap.owner);
+        let result = manager.revoke(cap_id);
+        (owner, result)
+    };
+    let audit_result = match result {
+        Ok(()) => crate::audit::AuditResult::Success,
+        Err(CapError::PermissionDenied) => crate::audit::AuditResult::Denied,
+        Err(error) => crate::audit::AuditResult::Error(cap_error_code(error)),
+    };
+    if let Some(owner) = owner {
+        crate::audit::record(
+            owner,
+            crate::audit::AuditAction::CapabilityRevoked(cap_id),
+            None,
+            audit_result,
+        );
+    } else {
+        crate::audit::record_anonymous(
+            crate::audit::AuditAction::CapabilityRevoked(cap_id),
+            audit_result,
+        );
+    }
+    result
+}
+
+const fn cap_error_code(error: CapError) -> i64 {
+    match error {
+        CapError::NotFound => -4,
+        CapError::PermissionDenied => -3,
+        CapError::AlreadyRevoked => -10,
+        CapError::TableFull => -5,
+        CapError::InvalidScope => -2,
+    }
+}

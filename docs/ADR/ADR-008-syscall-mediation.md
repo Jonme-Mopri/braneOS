@@ -1,14 +1,15 @@
 # ADR-008: Mediación central de syscalls y acceso a memoria de usuario
 
-**Estado:** Implementación incremental: metadata y `UserRange` entregados
-**Fecha:** 2026-10-13
+**Estado:** Implementación incremental: identidad y auditoría terminal entregadas;
+copy y retorno seguro pendientes
+**Fecha:** 2026-10-14
 **Autores:** Brane OS Team
 
 ## Contexto
 
 ADR-003 fija numeración, registros y errores de la ABI v0.1. El kernel ya entra
 por `syscall/sysret`, pero el dispatcher no aplica capacidades de manera
-uniforme, no registra `SyscallInvoked` y no dispone de una API para copiar
+uniforme y no dispone de una API para copiar
 memoria de ring 3. Varios números están reservados sin handler y algunas rutas
 devuelven éxito con semántica stub.
 
@@ -32,8 +33,11 @@ recursos. Ningún stub puede simular éxito.
 
 El primer corte implementa esta tabla para los 28 números, el rechazo
 fail-closed de reservas sin handler y un `UserRange` puro que valida límites,
-overflow, canonicalidad, límite user y páginas afectadas. La copia real, la
-mediación dinámica y el retorno seguro siguen siendo gates posteriores.
+overflow, canonicalidad, límite user y páginas afectadas. El segundo corte
+captura `CallerContext` desde scheduler/ProcessTable, devuelve el PID kernel-
+derived, satura `syscall_count` y emite un evento terminal
+`SyscallCompleted`. La copia real, la mediación dinámica y el retorno seguro
+siguen siendo gates posteriores.
 
 ### Identidad y scope derivados del kernel
 

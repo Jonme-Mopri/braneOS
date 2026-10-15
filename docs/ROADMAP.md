@@ -2,7 +2,7 @@
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §19.  
 > Estado: **Activo** — se actualiza conforme el proyecto avanza.  
-> Última actualización: **2026-10-10**
+> Última actualización: **2026-10-14**
 
 ---
 
@@ -18,8 +18,10 @@
  ─────────────────────────────────────────────────────┼─────────────────────────────────────────────────▶
 ```
 
-**Foco actual:** Fase 13 — completar el rearmado PCI y la validación física
-después del gate S3 de xHCI. MSI-X y MSI ya entregan eventos en Q35; polling
+**Foco actual:** Fase 14 — cerrar la mediación central de syscalls antes de
+aislar servicios. La identidad confiable, `GetPid` kernel-derived, el contador
+de syscalls saturado y la auditoría terminal ya están implementados; user-copy,
+capabilities dinámicas e IPC autenticado siguen abiertos. MSI-X y MSI ya entregan eventos en Q35; polling
 permanece como fallback y un mismatch de rings termina en quarantine. La
 secuencia, rollback y pruebas están definidos en
 [`PCI_INTERRUPTS.md`](PCI_INTERRUPTS.md).
@@ -429,8 +431,19 @@ regla de autorización prevista, clase de auditoría y presupuesto de copia. El
 dispatcher rechaza antes del handler cualquier reserva sin implementación.
 `UserRange` valida sin dereferenciar memoria los casos null, longitud máxima,
 overflow, canonicalidad, límite user configurable y páginas atravesadas. Este
-corte no habilita todavía user-copy, capabilities dinámicas, auditoría terminal
-ni procesos ring 3.
+corte no habilita todavía user-copy, capabilities dinámicas ni procesos ring 3.
+
+**Segundo corte de Fase 14 implementado:** el dispatcher captura un
+`CallerContext` confiable desde el scheduler y `ProcessTable`, usa el slot
+privado de cada CPU sin heredar la tarea de otro CPU, devuelve el `Pid` real en
+`GetPid` e incrementa `Process.syscall_count` de forma saturada. Cada entrada
+reconocida deja un `SyscallCompleted` con clase, resultado y origen
+TaskId/Pid/CPU; el tick se captura antes del lock de auditoría. Grants y
+revokes separan la mutación de capability del append de auditoría para evitar
+inversión de locks. Los registros de servicios de boot sólo se crean cuando
+existe un task scheduler real que los respalda. Los tests host cubren PID
+distinto de TaskId, argumentos forjados, saturación, ownership ambiguo o
+terminado, ring wrap y origen ausente.
 
 ---
 
@@ -486,7 +499,7 @@ generation conforme a [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) y
 |---------|-------|
 | **Módulos del kernel** | 40 archivos de módulo (excluye `lib.rs`, `main.rs`, `tests.rs`) |
 | **Líneas de código (Rust)** | ~23,000 |
-| **Unit tests** | 194 (incluye metadata exhaustiva de syscalls, `UserRange`, USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, registry de vectores, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
+| **Unit tests** | 203 (incluye metadata exhaustiva de syscalls, identidad/auditoría terminal, `UserRange`, ownership ambiguo/terminado, USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, registry de vectores, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
 | **Syscalls definidas** | 28 (incluye Kill, SigAction, SigReturn, SigProcMask) |
 | **Harnesses de test Python** | 8 (boot + ACPI S3 + 2 security + 2 integration + 2 e2e) |
 | **CI checks** | 15 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, PCI interrupts, USB HID, USB storage, ACPI S3, security, integration, E2E) |

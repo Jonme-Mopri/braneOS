@@ -674,16 +674,71 @@ pub struct SyscallContext {
     pub arg5: u64,
 }
 
+/// Trusted identity captured from kernel scheduler/process state at syscall
+/// entry. User supplied arguments never participate in this snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallerContext {
+    pub task_id: crate::sched::TaskId,
+    pub pid: crate::process::Pid,
+    pub cpu_id: u16,
+}
+
+/// Resolve the task executing on the current logical CPU and its process.
+///
+/// An initialized CPU uses its private scheduler snapshot, including the
+/// BSP. Only the pre-multicore BSP may use the legacy scheduler cursor. An
+/// initialized but idle CPU deliberately has no process identity.
+pub fn capture_caller_context() -> Option<CallerContext> {
+    let cpu_id = crate::smp::current_cpu_index();
+    capture_caller_context_for_cpu(cpu_id)
+}
+
+fn capture_caller_context_for_cpu(cpu_id: usize) -> Option<CallerContext> {
+    if cpu_id >= crate::smp::MAX_CPUS {
+        return None;
+    }
+    let state = crate::sched::cpu_scheduler_snapshot(cpu_id)?;
+    let task_id = if state.initialized {
+        state.current_task?
+    } else if cpu_id == 0 {
+        crate::sched::SCHEDULER.lock().current_task_id()?
+    } else {
+        return None;
+    };
+
+    let pid = {
+        let process_table = crate::process::PROCESS_TABLE.lock();
+        process_table.get_pid_by_task_id(task_id)?
+    };
+
+    Some(CallerContext {
+        task_id,
+        pid,
+        cpu_id: cpu_id as u16,
+    })
+}
+
 /// Main dispatcher: routes a syscall to the appropriate handler.
 ///
 /// This is called from the low-level syscall entry point (assembly
 /// stub or int 0x80 handler). Returns a result to be placed in RAX.
 pub fn dispatch(ctx: &SyscallContext) -> SyscallResult {
+    let caller = capture_caller_context();
+    // Account all entries from a resolved process, including unknown and
+    // reserved numbers. Identity/counters never depend on user arguments.
+    if let Some(caller) = caller.as_ref() {
+        let mut process_table = crate::process::PROCESS_TABLE.lock();
+        if let Some(process) = process_table.get_mut(caller.pid) {
+            process.syscall_count = process.syscall_count.saturating_add(1);
+        }
+    }
     let syscall = match SyscallNumber::from_raw(ctx.number) {
         Some(s) => s,
         None => {
             crate::serial_println!("[syscall] UNKNOWN syscall number: {}", ctx.number);
-            return SyscallResult::Err(SyscallError::InvalidSyscall);
+            let result = SyscallResult::Err(SyscallError::InvalidSyscall);
+            crate::audit::log_syscall(caller.as_ref(), ctx.number, None, audit_result(result));
+            return result;
         }
     };
 
@@ -694,27 +749,50 @@ pub fn dispatch(ctx: &SyscallContext) -> SyscallResult {
         Some(spec) => spec,
         None => {
             crate::serial_println!("[syscall] {:?} has no mediation metadata", syscall);
-            return SyscallResult::Err(SyscallError::InvalidSyscall);
+            let result = SyscallResult::Err(SyscallError::InvalidSyscall);
+            crate::audit::log_syscall(caller.as_ref(), syscall as u64, None, audit_result(result));
+            return result;
         }
     };
     if spec.state == HandlerState::Unimplemented {
         crate::serial_println!("[syscall] {:?} is not implemented", syscall);
-        return SyscallResult::Err(SyscallError::InvalidSyscall);
+        let result = SyscallResult::Err(SyscallError::InvalidSyscall);
+        crate::audit::log_syscall(
+            caller.as_ref(),
+            syscall as u64,
+            Some(spec.audit_class),
+            audit_result(result),
+        );
+        return result;
     }
 
+    let caller = match caller {
+        Some(caller) => caller,
+        None => {
+            crate::serial_println!("[syscall] {:?} has no trusted caller", syscall);
+            let result = SyscallResult::Err(SyscallError::Internal);
+            crate::audit::log_syscall(
+                None,
+                syscall as u64,
+                Some(spec.audit_class),
+                audit_result(result),
+            );
+            return result;
+        }
+    };
+
     crate::serial_println!(
-        "[syscall] {:?}(0x{:x}, 0x{:x}, 0x{:x})",
+        "[syscall] {:?} caller pid={} cpu={}",
         syscall,
-        ctx.arg1,
-        ctx.arg2,
-        ctx.arg3
+        caller.pid,
+        caller.cpu_id
     );
 
     let mut result = match syscall {
         // --- Process ---
         SyscallNumber::Exit => handle_exit(ctx),
         SyscallNumber::Yield => handle_yield(ctx),
-        SyscallNumber::GetPid => handle_getpid(ctx),
+        SyscallNumber::GetPid => handle_getpid(&caller),
 
         // --- I/O ---
         SyscallNumber::Write => handle_write(ctx),
@@ -729,9 +807,9 @@ pub fn dispatch(ctx: &SyscallContext) -> SyscallResult {
 
         // --- Signals ---
         SyscallNumber::Kill => handle_kill(ctx),
-        SyscallNumber::SigAction => handle_sigaction(ctx),
-        SyscallNumber::SigReturn => handle_sigreturn(ctx),
-        SyscallNumber::SigProcMask => handle_sigprocmask(ctx),
+        SyscallNumber::SigAction => handle_sigaction(ctx, &caller),
+        SyscallNumber::SigReturn => handle_sigreturn(ctx, &caller),
+        SyscallNumber::SigProcMask => handle_sigprocmask(ctx, &caller),
 
         // --- Unimplemented ---
         _ => {
@@ -740,35 +818,52 @@ pub fn dispatch(ctx: &SyscallContext) -> SyscallResult {
         }
     };
 
+    // The terminal syscall result precedes signal delivery: a signal may
+    // replace the return register, but cannot turn a denied/failed operation
+    // into an audited success.
+    crate::audit::log_syscall(
+        Some(&caller),
+        syscall as u64,
+        Some(spec.audit_class),
+        audit_result(result),
+    );
+
     // Deliver pending signals if any (unless Exit or SigReturn)
     if syscall != SyscallNumber::Exit && syscall != SyscallNumber::SigReturn {
-        if let Some(pid) = get_current_pid() {
-            let mut sig_mgr = crate::signal::SIGNAL_MANAGER.lock();
-            if let Some((sig, handler_addr)) = sig_mgr.deliver_pending(pid) {
-                let user_context_ptr =
-                    (ctx as *const SyscallContext as u64 + 48) as *mut crate::usermode::UserContext;
-                unsafe {
-                    let mut p_table = crate::process::PROCESS_TABLE.lock();
-                    if let Some(proc) = p_table.get_mut(pid) {
-                        proc.saved_context = Some(*user_context_ptr);
-                    }
-
-                    if let Some(ref mut saved) =
-                        p_table.get_mut(pid).and_then(|p| p.saved_context.as_mut())
-                    {
-                        saved.rax = result.to_raw() as u64;
-                    }
-
-                    let user_ctx = &mut *user_context_ptr;
-                    user_ctx.rcx = handler_addr; // redirect userspace RIP
-                    user_ctx.rdi = sig as u64; // signal number as first arg
-                    result = SyscallResult::Ok(0);
+        let mut sig_mgr = crate::signal::SIGNAL_MANAGER.lock();
+        if let Some((sig, handler_addr)) = sig_mgr.deliver_pending(caller.pid) {
+            let user_context_ptr =
+                (ctx as *const SyscallContext as u64 + 48) as *mut crate::usermode::UserContext;
+            unsafe {
+                let mut p_table = crate::process::PROCESS_TABLE.lock();
+                if let Some(proc) = p_table.get_mut(caller.pid) {
+                    proc.saved_context = Some(*user_context_ptr);
                 }
+
+                if let Some(ref mut saved) = p_table
+                    .get_mut(caller.pid)
+                    .and_then(|p| p.saved_context.as_mut())
+                {
+                    saved.rax = result.to_raw() as u64;
+                }
+
+                let user_ctx = &mut *user_context_ptr;
+                user_ctx.rcx = handler_addr; // redirect userspace RIP
+                user_ctx.rdi = sig as u64; // signal number as first arg
+                result = SyscallResult::Ok(0);
             }
         }
     }
 
     result
+}
+
+fn audit_result(result: SyscallResult) -> crate::audit::AuditResult {
+    match result {
+        SyscallResult::Ok(_) => crate::audit::AuditResult::Success,
+        SyscallResult::Err(SyscallError::PermissionDenied) => crate::audit::AuditResult::Denied,
+        SyscallResult::Err(error) => crate::audit::AuditResult::Error(error as i64),
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -787,12 +882,8 @@ fn handle_yield(_ctx: &SyscallContext) -> SyscallResult {
     SyscallResult::Ok(0)
 }
 
-fn handle_getpid(_ctx: &SyscallContext) -> SyscallResult {
-    let scheduler = crate::sched::SCHEDULER.lock();
-    match scheduler.current_task() {
-        Some(task) => SyscallResult::Ok(task.id),
-        None => SyscallResult::Err(SyscallError::Internal),
-    }
+fn handle_getpid(caller: &CallerContext) -> SyscallResult {
+    SyscallResult::Ok(caller.pid)
 }
 
 fn handle_write(ctx: &SyscallContext) -> SyscallResult {
@@ -838,9 +929,7 @@ fn handle_get_system_info(_ctx: &SyscallContext) -> SyscallResult {
 
 /// Helper to get current running process PID.
 pub fn get_current_pid() -> Option<u64> {
-    let task_id = crate::sched::SCHEDULER.lock().current_task()?.id;
-    let p_table = crate::process::PROCESS_TABLE.lock();
-    p_table.get_pid_by_task_id(task_id)
+    capture_caller_context().map(|caller| caller.pid)
 }
 
 fn handle_kill(ctx: &SyscallContext) -> SyscallResult {
@@ -855,14 +944,11 @@ fn handle_kill(ctx: &SyscallContext) -> SyscallResult {
     }
 }
 
-fn handle_sigaction(ctx: &SyscallContext) -> SyscallResult {
+fn handle_sigaction(ctx: &SyscallContext, caller: &CallerContext) -> SyscallResult {
     let sig_val = ctx.arg1 as u8;
     let handler_addr = ctx.arg2;
 
-    let current_pid = match get_current_pid() {
-        Some(pid) => pid,
-        None => return SyscallResult::Err(SyscallError::Internal),
-    };
+    let current_pid = caller.pid;
 
     match crate::signal::Signal::try_from(sig_val) {
         Ok(sig) => {
@@ -886,11 +972,8 @@ fn handle_sigaction(ctx: &SyscallContext) -> SyscallResult {
     }
 }
 
-fn handle_sigreturn(ctx: &SyscallContext) -> SyscallResult {
-    let current_pid = match get_current_pid() {
-        Some(pid) => pid,
-        None => return SyscallResult::Err(SyscallError::Internal),
-    };
+fn handle_sigreturn(ctx: &SyscallContext, caller: &CallerContext) -> SyscallResult {
+    let current_pid = caller.pid;
 
     let mut p_table = crate::process::PROCESS_TABLE.lock();
     if let Some(proc) = p_table.get_mut(current_pid) {
@@ -909,14 +992,11 @@ fn handle_sigreturn(ctx: &SyscallContext) -> SyscallResult {
     }
 }
 
-fn handle_sigprocmask(ctx: &SyscallContext) -> SyscallResult {
+fn handle_sigprocmask(ctx: &SyscallContext, caller: &CallerContext) -> SyscallResult {
     let how = ctx.arg1;
     let set = ctx.arg2; // bitmask of signals
 
-    let current_pid = match get_current_pid() {
-        Some(pid) => pid,
-        None => return SyscallResult::Err(SyscallError::Internal),
-    };
+    let current_pid = caller.pid;
 
     let mut p_table = crate::process::PROCESS_TABLE.lock();
     if let Some(proc) = p_table.get_mut(current_pid) {

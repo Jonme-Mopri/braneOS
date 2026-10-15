@@ -214,11 +214,25 @@ impl ProcessTable {
 
     /// Get PID of process associated with scheduler TaskId.
     pub fn get_pid_by_task_id(&self, task_id: TaskId) -> Option<Pid> {
-        self.processes
+        let mut matches = self
+            .processes
             .iter()
             .flatten()
-            .find(|p| p.scheduler_task == task_id)
-            .map(|p| p.pid)
+            .filter(|p| {
+                p.scheduler_task == task_id
+                    && p.state != ProcessState::Terminated
+                    && p.state != ProcessState::Zombie
+            })
+            .map(|p| p.pid);
+        let pid = matches.next()?;
+        // A scheduler task must belong to exactly one live process. Returning
+        // None on duplicate ownership prevents GetPid from selecting an
+        // arbitrary process after a stale/reused task mapping.
+        if matches.next().is_some() {
+            None
+        } else {
+            Some(pid)
+        }
     }
 
     /// List all non-terminated processes.
