@@ -630,6 +630,23 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         let init_pid = table.create("init", None, init_scheduler_task).unwrap();
         table.start(init_pid);
 
+        // Keep service records tied to real scheduler tasks. A synthetic
+        // TaskId would make caller capture ambiguous or point at a task that
+        // cannot actually execute; on a one-CPU boot there are therefore no
+        // service records until dedicated service tasks exist.
+        for (service_name, task_slot) in [
+            ("log_service", 1usize),
+            ("network_service", 2usize),
+            ("brane_service", 3usize),
+        ] {
+            if let Some(Some(task_id)) = smp_worker_tasks.get(task_slot) {
+                let service_pid = table.create(service_name, Some(init_pid), *task_id);
+                if let Some(service_pid) = service_pid {
+                    table.start(service_pid);
+                }
+            }
+        }
+
         serial_println!(
             "[proc] Process table ready: {} active processes.",
             table.active_count()

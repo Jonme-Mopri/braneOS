@@ -208,11 +208,21 @@ def run_integration_test(img_path: Path, timeout: int) -> int:
     # --- Detailed analysis ---
     full_output = "\n".join(output_lines)
 
-    # Verify GetPid returned a kernel-derived process ID
-    if getpid_value is not None:
-        ok(f"GetPid syscall returned pid={getpid_value} (kernel-derived process ID)")
-    else:
-        warn("Could not parse GetPid return value from serial output")
+    # Verify GetPid returned the process created for init. Accepting any
+    # integer here could hide the fail-closed Internal error from an absent
+    # caller context.
+    init_match = re.search(r"\[proc\] Created process 'init' \(pid=(\d+)\)", full_output)
+    if getpid_value is None:
+        error("Could not parse GetPid return value from serial output")
+        return 1
+    if init_match is None:
+        error("Could not find init process identity in serial output")
+        return 1
+    init_pid = int(init_match.group(1))
+    if getpid_value != init_pid:
+        error(f"GetPid returned {getpid_value}, expected init pid {init_pid}")
+        return 1
+    ok(f"GetPid syscall returned pid={getpid_value} (kernel-derived process ID)")
 
     # Verify write syscall stub was exercised
     if "write(fd=" in full_output:

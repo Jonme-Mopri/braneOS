@@ -440,8 +440,10 @@ privado de cada CPU sin heredar la tarea de otro CPU, devuelve el `Pid` real en
 reconocida deja un `SyscallCompleted` con clase, resultado y origen
 TaskId/Pid/CPU; el tick se captura antes del lock de auditoría. Grants y
 revokes separan la mutación de capability del append de auditoría para evitar
-inversión de locks. Los tests host cubren PID distinto de TaskId, argumentos
-forjados, saturación, ring wrap y origen ausente.
+inversión de locks. Los registros de servicios de boot sólo se crean cuando
+existe un task scheduler real que los respalda. Los tests host cubren PID
+distinto de TaskId, argumentos forjados, saturación, ownership ambiguo o
+terminado, ring wrap y origen ausente.
 
 ---
 
@@ -497,7 +499,7 @@ generation conforme a [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) y
 |---------|-------|
 | **Módulos del kernel** | 40 archivos de módulo (excluye `lib.rs`, `main.rs`, `tests.rs`) |
 | **Líneas de código (Rust)** | ~23,000 |
-| **Unit tests** | 199 (incluye metadata exhaustiva de syscalls, identidad/auditoría terminal, `UserRange`, USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, registry de vectores, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
+| **Unit tests** | 203 (incluye metadata exhaustiva de syscalls, identidad/auditoría terminal, `UserRange`, ownership ambiguo/terminado, USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, registry de vectores, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
 | **Syscalls definidas** | 28 (incluye Kill, SigAction, SigReturn, SigProcMask) |
 | **Harnesses de test Python** | 8 (boot + ACPI S3 + 2 security + 2 integration + 2 e2e) |
 | **CI checks** | 15 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, PCI interrupts, USB HID, USB storage, ACPI S3, security, integration, E2E) |

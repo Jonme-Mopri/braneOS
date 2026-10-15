@@ -1,6 +1,6 @@
 # Documentación de Brane OS
 
-> Estado documental: **activo**. Última revisión transversal: **2026-10-13**.
+> Estado documental: **activo**. Última revisión transversal: **2026-10-14**.
 
 Este directorio reúne la visión, el diseño vigente, la evidencia operativa y
 los planes de evolución de Brane OS. La documentación distingue explícitamente

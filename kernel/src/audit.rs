@@ -198,11 +198,22 @@ pub static AUDIT: Mutex<AuditLog> = Mutex::new(AuditLog::new());
 // Convenience functions
 // -----------------------------------------------------------------------
 
-fn current_origin(source: Option<TaskId>) -> AuditOrigin {
+/// Capture scheduler time and CPU identity as one non-preemptible snapshot.
+/// Timer/IPI handlers can touch `SCHEDULER`, so allowing an interrupt between
+/// the snapshot and that lock acquisition would self-deadlock on bare metal.
+fn snapshot_tick_cpu() -> (u64, u16) {
+    crate::sched::with_interrupts_disabled(|| {
+        let cpu_id = crate::smp::current_cpu_index() as u16;
+        let tick = crate::sched::SCHEDULER.lock().total_ticks();
+        (tick, cpu_id)
+    })
+}
+
+fn current_origin(source: Option<TaskId>, cpu_id: u16) -> AuditOrigin {
     AuditOrigin {
         task_id: source,
         pid: None,
-        cpu_id: crate::smp::current_cpu_index() as u16,
+        cpu_id,
     }
 }
 
@@ -214,8 +225,8 @@ pub fn record(
     capability_used: Option<CapabilityId>,
     result: AuditResult,
 ) {
-    let tick = crate::sched::SCHEDULER.lock().total_ticks();
-    let origin = current_origin(Some(source));
+    let (tick, cpu_id) = snapshot_tick_cpu();
+    let origin = current_origin(Some(source), cpu_id);
     AUDIT
         .lock()
         .record_at(tick, origin, action, capability_used, result);
@@ -223,14 +234,10 @@ pub fn record(
 
 /// Record a domain event whose caller identity could not be resolved.
 pub fn record_anonymous(action: AuditAction, result: AuditResult) {
-    let tick = crate::sched::SCHEDULER.lock().total_ticks();
-    AUDIT.lock().record_at(
-        tick,
-        AuditOrigin::anonymous(crate::smp::current_cpu_index() as u16),
-        action,
-        None,
-        result,
-    );
+    let (tick, cpu_id) = snapshot_tick_cpu();
+    AUDIT
+        .lock()
+        .record_at(tick, AuditOrigin::anonymous(cpu_id), action, None, result);
 }
 
 /// Record the terminal result of one syscall. An absent caller is preserved
@@ -241,14 +248,14 @@ pub fn log_syscall(
     class: Option<crate::syscall::AuditClass>,
     result: AuditResult,
 ) {
-    let tick = crate::sched::SCHEDULER.lock().total_ticks();
+    let (tick, cpu_id) = snapshot_tick_cpu();
     let origin = caller
         .map(|caller| AuditOrigin {
             task_id: Some(caller.task_id),
             pid: Some(caller.pid),
             cpu_id: caller.cpu_id,
         })
-        .unwrap_or_else(|| current_origin(None));
+        .unwrap_or_else(|| current_origin(None, cpu_id));
     AUDIT.lock().record_at(
         tick,
         origin,

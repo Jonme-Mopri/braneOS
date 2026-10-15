@@ -10,8 +10,9 @@ All notable changes to Brane OS are documented here. The project follows
 - Trusted syscall caller capture from the BSP/AP scheduler and process table,
   kernel-derived `GetPid`, saturating per-process syscall accounting, and
   terminal `SyscallCompleted` audit events with PID/TaskId/CPU origin. Audit
-  snapshots avoid scheduler↔audit lock inversion; capability mutation events
-  are appended after releasing the capability manager.
+  snapshots run with local interrupts disabled to avoid scheduler↔audit lock
+  inversion; capability mutation events are appended after releasing the
+  capability manager. Duplicate or terminated task mappings fail closed.
 - First Phase 14 syscall mediation cut: exhaustive metadata for all 28 ABI
   numbers, fail-closed rejection of reserved unimplemented calls, and a pure
   `UserRange` validator for null, length, overflow, canonicality, user limits

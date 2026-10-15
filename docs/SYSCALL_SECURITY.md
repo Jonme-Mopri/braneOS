@@ -342,9 +342,9 @@ audit append
 ```
 
 No se llama auditoría mientras se conserva `CAP_MANAGER`, scheduler,
-ProcessTable, IPC, VFS o signal manager. `AuditLog::record` debe recibir el tick
-capturado o tomarlo antes de adquirir `AUDIT`; hoy lo consulta mientras el lock
-de auditoría ya está tomado y ese orden debe eliminarse.
+ProcessTable, IPC, VFS o signal manager. Los wrappers de auditoría capturan
+tick y CPU con interrupciones locales deshabilitadas antes de adquirir
+`AUDIT`; el append no vuelve a tomar locks de scheduler ni de APIC.
 
 Los grants/revokes devuelven un resultado de dominio y el caller registra el
 evento después de liberar el capability manager. Ningún copy user ocurre bajo

@@ -1,7 +1,7 @@
 # ARCHITECTURE.md — Brane OS
 
 > Documento derivado de `PROJECT_MASTER_SPEC.md` §8–§10.  
-> Estado: **vigente** — baseline v0.1. Última actualización: **2026-09-12**.
+> Estado: **vigente** — baseline v0.1. Última actualización: **2026-10-14**.
 
 La arquitectura describe tanto el estado implementado como el objetivo por
 capas. Los componentes marcados como futuros no deben interpretarse como
@@ -464,11 +464,12 @@ reserva para el primer salto a ring 3. De los 28 números reservados sólo un
 subconjunto tiene dispatch y varias operaciones conservan semántica stub. No hay
 fallback `int 0x80` conectado. Ver [`ADR-003`](ADR/ADR-003-syscall-abi.md).
 
-La frontera objetivo añade una tabla exhaustiva para los 28 números, identidad
-derivada del estado per-CPU, capability check central, copia segura de todas las
-páginas user, auditoría terminal y validación de RIP/RSP/RFLAGS antes de
-`sysret`. Este hardening sigue pendiente y es prerrequisito para aislar servicios
-de Fase 14; ver [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md) y
+La frontera implementada ya añade la tabla exhaustiva para los 28 números,
+identidad derivada del estado per-CPU, `GetPid` kernel-derived, contador de
+syscalls saturado y auditoría terminal con snapshot no preemptible. Capability
+check central, copia segura de todas las páginas user y validación de
+RIP/RSP/RFLAGS antes de `sysret` siguen pendientes y son prerrequisitos para
+aislar servicios de Fase 14; ver [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md) y
 [`ADR-008`](ADR/ADR-008-syscall-mediation.md).
 
 ---
