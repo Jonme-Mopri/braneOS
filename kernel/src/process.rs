@@ -78,6 +78,16 @@ pub struct AddressSpacePin {
     generation: u64,
 }
 
+impl AddressSpacePin {
+    pub const fn pid(&self) -> Pid {
+        self.pid
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressSpaceError {
     NotFound,

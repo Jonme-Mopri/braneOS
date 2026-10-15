@@ -465,6 +465,13 @@ Los permisos internos `PROCESS_CREATE`, `PROCESS_SIGNAL`, `MEMORY_MAP`,
 `BRANE_SEND` y `BRANE_RECV` ya tienen representación separada del ABI. Los
 tests host suben a 219 e incluyen allow/deny de `Write` con auditoría.
 
+**Quinto corte parcial de Fase 14 implementado:**
+`pin_and_validate_user_range` mantiene un pin del proceso mientras el mapper
+recorre todas las páginas, devuelve un lease con generación revalidable y
+libera el pin automáticamente en los fallos de validación. Los tests host suben
+a 221 y cubren release explícito, bloqueo de mutaciones y no-fuga en el fallo de
+la segunda etapa. El acceso a bytes user y el fault fixup siguen pendientes.
+
 ---
 
 ## 🔲 Fase 14 — Plataforma y Ecosistema Brane
@@ -474,7 +481,7 @@ aplicaciones y dispositivos Brane.
 
 | Componente | Estado | Prioridad | Dependencia |
 |-----------|--------|-----------|-------------|
-| Mediación syscall y memoria ring 3 | 🟡 | ALTA | Metadata, caller audit, walk, pin/generación y auth de handlers activos implementados; acople/fixup, user-copy, auth completa y retorno seguro siguen en `SYSCALL_SECURITY.md` |
+| Mediación syscall y memoria ring 3 | 🟡 | ALTA | Metadata, caller audit, walk, mapper pin/generación y auth de handlers activos implementados; fault fixup, user-copy, auth completa y retorno seguro siguen en `SYSCALL_SECURITY.md` |
 | IPC autenticado y wait queues | 🔲 | ALTA | Endpoints generacionales, sender kernel y park/notify definidos en `IPC_RUNTIME.md` |
 | Plano de control de seguridad ring 3 | 🔲 | ALTA | Bootstrap audit → identity → policy → broker definido en `SECURITY_SERVICES.md` |
 | Runtime IA aislado | 🔲 | ALTA | `ControlReady`, telemetría tipada, sandbox y leases definidos en `AI_RUNTIME.md` |
@@ -519,7 +526,7 @@ generation conforme a [`PACKAGE_MANAGER.md`](PACKAGE_MANAGER.md) y
 |---------|-------|
 | **Módulos del kernel** | 40 archivos de módulo (excluye `lib.rs`, `main.rs`, `tests.rs`) |
 | **Líneas de código (Rust)** | ~23,000 |
-| **Unit tests** | 219 (incluye metadata exhaustiva de syscalls, identidad/auditoría terminal, `UserRange`, walk de páginas, pin/generación, auth allow/deny y ownership ambiguo/terminado, USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, registry de vectores, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
+| **Unit tests** | 221 (incluye metadata exhaustiva de syscalls, identidad/auditoría terminal, `UserRange`, walk de páginas, mapper pin/generación y auth allow/deny, ownership ambiguo/terminado, USB BOT/SCSI y recuperación negativa, xHCI HID/Bulk, MCFG/ECAM, FAT32, DMA/virtio-blk, PCI/block, registry de vectores, MADT/APIC/SMP, integration, stress y mutation-fuzz) |
 | **Syscalls definidas** | 28 (incluye Kill, SigAction, SigReturn, SigProcMask) |
 | **Harnesses de test Python** | 8 (boot + ACPI S3 + 2 security + 2 integration + 2 e2e) |
 | **CI checks** | 15 (build, fmt, clippy, unit, stress/fuzz, release ISO, boot, PCIe ECAM, PCI interrupts, USB HID, USB storage, ACPI S3, security, integration, E2E) |

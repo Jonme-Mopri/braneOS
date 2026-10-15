@@ -22,6 +22,7 @@ use x86_64::structures::paging::{
 };
 use x86_64::{PhysAddr, VirtAddr};
 
+use crate::process::{AddressSpaceError, AddressSpacePin};
 use crate::syscall::{UserPagePermissions, UserPageValidationError, UserRange};
 
 // -----------------------------------------------------------------------
@@ -124,6 +125,97 @@ pub fn validate_user_range(
     range: UserRange,
 ) -> Result<(), UserPageValidationError> {
     range.validate_pages(|page_start| effective_user_page_permissions(mapper, page_start))
+}
+
+/// Failure while acquiring a stable process mapping view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinnedUserRangeError {
+    AddressSpace(AddressSpaceError),
+    Pages(UserPageValidationError),
+}
+
+/// A page-validated range whose process mapping generation is pinned.
+///
+/// The pin is intentionally explicit: callers release it after the copy or
+/// other operation completes, while the process-table lock is held only for
+/// the short acquire/release sections. No user bytes are dereferenced by this
+/// type.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PinnedUserRange {
+    pin: AddressSpacePin,
+    range: UserRange,
+}
+
+impl PinnedUserRange {
+    pub const fn range(&self) -> UserRange {
+        self.range
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.pin.generation()
+    }
+
+    /// Verify that the process still exists at the pinned generation.
+    /// Mapping writers cannot advance the generation while this pin is held;
+    /// the check also handles a process being removed before release.
+    pub fn is_current_in(&self, table: &crate::process::ProcessTable) -> bool {
+        table
+            .get(self.pin.pid())
+            .map(|process| process.address_space.generation() == self.generation())
+            .unwrap_or(false)
+    }
+
+    pub fn is_current(&self) -> bool {
+        crate::process::PROCESS_TABLE
+            .lock()
+            .get(self.pin.pid())
+            .map(|process| process.address_space.generation() == self.generation())
+            .unwrap_or(false)
+    }
+
+    pub fn release_in(
+        self,
+        table: &mut crate::process::ProcessTable,
+    ) -> Result<(), AddressSpaceError> {
+        table.release_address_space_pin(self.pin)
+    }
+
+    pub fn release(self) -> Result<(), AddressSpaceError> {
+        crate::process::PROCESS_TABLE
+            .lock()
+            .release_address_space_pin(self.pin)
+    }
+}
+
+/// Pin a process generation, validate every page through the active mapper,
+/// and return an explicit lease for a subsequent copy operation. Validation
+/// failure releases the pin before returning, so no failed probe leaks a
+/// reader slot.
+pub fn pin_and_validate_user_range(
+    pid: crate::process::Pid,
+    mapper: &OffsetPageTable,
+    range: UserRange,
+) -> Result<PinnedUserRange, PinnedUserRangeError> {
+    let mut table = crate::process::PROCESS_TABLE.lock();
+    pin_and_validate_user_range_in(&mut table, pid, mapper, range)
+}
+
+/// Testable form of [`pin_and_validate_user_range`] that uses a caller-owned
+/// process table and therefore does not depend on global process state.
+pub fn pin_and_validate_user_range_in(
+    table: &mut crate::process::ProcessTable,
+    pid: crate::process::Pid,
+    mapper: &OffsetPageTable,
+    range: UserRange,
+) -> Result<PinnedUserRange, PinnedUserRangeError> {
+    let pin = table
+        .pin_address_space(pid)
+        .map_err(PinnedUserRangeError::AddressSpace)?;
+    if let Err(error) = validate_user_range(mapper, range) {
+        let _ = table.release_address_space_pin(pin);
+        return Err(PinnedUserRangeError::Pages(error));
+    }
+    Ok(PinnedUserRange { pin, range })
 }
 
 /// Read the effective user permissions for one page without touching its
@@ -400,5 +492,44 @@ mod user_mapping_tests {
             tables.validate(UserRange::new(0, 0, UserAccess::Write, 0).unwrap()),
             Ok(())
         );
+    }
+
+    #[test]
+    fn pin_and_validate_holds_generation_until_release() {
+        let mut tables = Tables::new();
+        let mut processes = crate::process::ProcessTable::new();
+        let pid = processes.create("mapped", None, 41).unwrap();
+        let range = range(UserAccess::Read);
+        let pinned = {
+            let mapper = unsafe { OffsetPageTable::new(&mut tables.p4, VirtAddr::zero()) };
+            pin_and_validate_user_range_in(&mut processes, pid, &mapper, range).unwrap()
+        };
+
+        assert!(pinned.is_current_in(&processes));
+        assert_eq!(processes.get(pid).unwrap().address_space.pin_count(), 1);
+        assert_eq!(
+            processes.bump_address_space_generation(pid),
+            Err(AddressSpaceError::Busy)
+        );
+        pinned.release_in(&mut processes).unwrap();
+        assert_eq!(processes.bump_address_space_generation(pid), Ok(2));
+    }
+
+    #[test]
+    fn failed_page_validation_releases_pin() {
+        let mut tables = Tables::new();
+        tables.p1[0].set_unused();
+        let mut processes = crate::process::ProcessTable::new();
+        let pid = processes.create("mapped", None, 42).unwrap();
+        let mapper = unsafe { OffsetPageTable::new(&mut tables.p4, VirtAddr::zero()) };
+        let result =
+            pin_and_validate_user_range_in(&mut processes, pid, &mapper, range(UserAccess::Read));
+        assert!(matches!(
+            result,
+            Err(PinnedUserRangeError::Pages(
+                UserPageValidationError::Unmapped { .. }
+            ))
+        ));
+        assert_eq!(processes.get(pid).unwrap().address_space.pin_count(), 0);
     }
 }
