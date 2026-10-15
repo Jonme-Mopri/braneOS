@@ -468,8 +468,8 @@ La frontera implementada ya añade la tabla exhaustiva para los 28 números,
 identidad derivada del estado per-CPU, `GetPid` kernel-derived, contador de
 syscalls saturado, auditoría terminal con snapshot no preemptible, un walk que
 valida todas las páginas user con permisos efectivos del page table activo, un
-protocolo de pin/generación en cada PCB y autorización dinámica para handlers
-activos. El acople del pin al mapper durante la copia, copia segura y
+protocolo de pin/generación en cada PCB, su acople al walk del mapper y
+autorización dinámica para handlers activos. La copia segura y
 validación de RIP/RSP/RFLAGS antes de `sysret` siguen pendientes y son
 prerrequisitos para aislar servicios de Fase 14; ver
 [`SYSCALL_SECURITY.md`](SYSCALL_SECURITY.md) y

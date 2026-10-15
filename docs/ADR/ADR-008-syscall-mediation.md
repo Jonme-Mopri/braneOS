@@ -145,8 +145,8 @@ además un evento de inicio correlacionado si luego soportan bloqueo largo.
 3. Añadir evento terminal y retirar logging raw.
 4. ~~Construir `UserRange` y validación pura.~~ ✅ Añadir walk de page tables
    para cada página y permisos efectivos, incluyendo entradas padre y páginas
-   grandes, más el protocolo de pin/generación en `ProcessTable`. Acoplar el
-   pin al mapper, añadir fixup y construir copy helpers sigue pendiente.
+   grandes, más el protocolo de pin/generación en `ProcessTable` y su acople al
+   mapper. Añadir fixup y construir copy helpers sigue pendiente.
 5. Convertir `Write` y después IPC en rutas reales.
 6. ~~Activar reglas de capability de forma incremental, con deny tests primero.~~ ✅
    Handlers activos derivan scopes y conservan el `CapabilityId`; las reservas

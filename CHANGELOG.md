@@ -17,6 +17,10 @@ All notable changes to Brane OS are documented here. The project follows
   process/service/brane scopes are derived from kernel state, internal policy
   permissions are separated from the ABI, successful checks retain their
   `CapabilityId` in terminal audit events, and denials stop before handlers.
+- Mapper-coupled user-range leases that pin a process mapping generation while
+  every page is validated, expose explicit revalidation/release, and release
+  automatically on validation failure. User-byte copy and recoverable faults
+  remain gated for the next increment.
 - Trusted syscall caller capture from the BSP/AP scheduler and process table,
   kernel-derived `GetPid`, saturating per-process syscall accounting, and
   terminal `SyscallCompleted` audit events with PID/TaskId/CPU origin. Audit
